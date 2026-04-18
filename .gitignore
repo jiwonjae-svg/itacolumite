@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+
+# Agent runtime data
+workspace/
+agent-data/
+vscode-user-data/
+vscode-extensions/
+
+# Internal docs (not for public)
+docs/
+internal/
+
+# Docker
+docker-compose.override.yml
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Logs & screenshots
+*.log
+screenshots/
+
+# Test artifacts
+.pytest_cache/
+htmlcov/
+.coverage
+.mypy_cache/
