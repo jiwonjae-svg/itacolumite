@@ -18,7 +18,17 @@ class GeminiSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="", env_file=".env", extra="ignore")
 
     gemini_api_key: str = "your_api_key_here"
-    gemini_model: str = "gemini-2.5-flash"
+    # Model tiers
+    gemini_model_fast: str = "gemini-2.5-flash"   # 빠른 루틴 작업용
+    gemini_model_pro: str = "gemini-2.5-pro"      # 복잡하거나 실패 누적 시 자동 전환
+    # Auto-upgrade policy
+    gemini_auto_upgrade: bool = True               # True: 조건에 따라 Pro로 자동 승격
+    gemini_auto_upgrade_threshold: float = 0.3    # 이 신뢰도 미만이면 Pro 사용
+    gemini_model_fast: str = "gemini-2.5-flash"   # 빠른 루틴 작업용
+    gemini_model_pro: str = "gemini-2.5-pro"      # 복잡하거나 실패 누적 시 자동 전환
+    # Auto-upgrade policy
+    gemini_auto_upgrade: bool = True               # True: 조건에 따라 Pro로 자동 승격
+    gemini_auto_upgrade_threshold: float = 0.3    # 이 신뢰도 미만이면 Pro 사용
     gemini_temperature: float = 0.3
     gemini_max_tokens: int = 4096
 

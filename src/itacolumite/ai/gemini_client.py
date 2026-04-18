@@ -20,10 +20,20 @@ class GeminiClient:
     def __init__(self) -> None:
         settings = get_settings().gemini
         self._client = genai.Client(api_key=settings.gemini_api_key)
-        self._model = settings.gemini_model
+        self._model_fast = settings.gemini_model_fast
+        self._model_pro = settings.gemini_model_pro
         self._temperature = settings.gemini_temperature
         self._max_output_tokens = settings.gemini_max_tokens
-        logger.info("Gemini client initialized (model=%s)", self._model)
+        logger.info(
+            "Gemini client initialized (fast=%s, pro=%s)",
+            self._model_fast,
+            self._model_pro,
+        
+        logger.info(
+            "Gemini client initialized (fast=%s, pro=%s)",
+            self._model_fast,
+            self._model_pro,
+        )
 
     @retry(
         stop=stop_after_attempt(3),
@@ -33,11 +43,13 @@ class GeminiClient:
     def generate(
         self,
         contents: list[Any],
+        model_override: str | None = None,
         *,
         system_instruction: str | None = None,
         temperature: float | None = None,
         max_output_tokens: int | None = None,
         response_mime_type: str = "application/json",
+        model_override: str | None = None,
     ) -> str:
         """Generate content from Gemini with structured JSON output.
 
@@ -54,14 +66,9 @@ class GeminiClient:
         config = types.GenerateContentConfig(
             temperature=temperature if temperature is not None else self._temperature,
             max_output_tokens=max_output_tokens if max_output_tokens is not None else self._max_output_tokens,
-            response_mime_type=response_mime_type,
-        )
-
-        if system_instruction:
-            config.system_instruction = system_instruction
-
+        model = model_override or self._model_fast
         response = self._client.models.generate_content(
-            model=self._model,
+            model=model,
             contents=contents,
             config=config,
         )
@@ -71,8 +78,9 @@ class GeminiClient:
             raise RuntimeError("Gemini returned empty response")
 
         logger.debug(
-            "Gemini response: %d chars, finish=%s",
+            "Gemini response: %d chars, model=%s, finish=%s",
             len(text),
+            model,
             response.candidates[0].finish_reason if response.candidates else "N/A",
         )
         return text
@@ -83,12 +91,34 @@ class GeminiClient:
         image_bytes: bytes,
         *,
         system_instruction: str | None = None,
+        use_pro: bool = False,
         **kwargs,
     ) -> str:
-        """Convenience: generate with a text prompt + screenshot image."""
+        """Convenience: generate with a text prompt + screenshot image.
+
+        Args:
+            use_pro: True 일 때 Pro 모델 사용. 기본값 False (Flash).
+        """
         image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/png")
+        model_override = self._model_pro if use_pro else None
         return self.generate(
             contents=[text_prompt, image_part],
             system_instruction=system_instruction,
+            model_override=model_override
+        system_instruction: str | None = None,
+        use_pro: bool = False,
+        **kwargs,
+    ) -> str:
+        """Convenience: generate with a text prompt + screenshot image.
+
+        Args:
+            use_pro: True 일 때 Pro 모델 사용. 기본값 False (Flash).
+        """
+        image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/png")
+        model_override = self._model_pro if use_pro else None
+        return self.generate(
+            contents=[text_prompt, image_part],
+            system_instruction=system_instruction,
+            model_override=model_override,
             **kwargs,
         )

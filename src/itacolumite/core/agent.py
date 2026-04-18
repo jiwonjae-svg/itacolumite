@@ -57,7 +57,9 @@ class AgentState:
     reasoning: str = ""
     plan: list[str] = field(default_factory=list)
     next_action: str = ""
-    confidence: float = 0.0
+    confidence: float = 1.0       # 1.0 = 첫 스텝에서 무조건 Pro 전환 방지
+    current_model: str = ""       # 1.0 = 첫 스텝에서 무조건 Pro 전환 방지
+    current_model: str = ""
     last_result: str = ""
     screenshot_path: str = ""
     api_calls: int = 0
@@ -255,12 +257,52 @@ class Agent:
         # 2. ANALYZE + PLAN: Send to Gemini
         history_summary = self._memory.get_history_summary()
         user_prompt = build_observe_prompt(task, history_summary, state_text + user_context)
+# Auto-upgrade to Pro when confidence is low or failures are accumulating
+        gemini_cfg = self._settings.gemini
+        use_pro = (
+            gemini_cfg.gemini_auto_upgrade
+            and (
+                self._consecutive_failures >= 2
+                or (step > 1 and s.confidence < gemini_cfg.gemini_auto_upgrade_threshold)
+            )
+        )
+        s.current_model = (
+            gemini_cfg.gemini_model_pro if use_pro else gemini_cfg.gemini_model_fast
+        )
+        if use_pro:
+            logger.info(
+                "[Auto-upgrade] Pro model selected (failures=%d, confidence=%.2f)",
+                self._consecutive_failures,
+                s.confidence,
+            )
 
         s.api_calls += 1
         raw_response = self._gemini.generate_with_image(
             text_prompt=user_prompt,
             image_bytes=screenshot_bytes,
             system_instruction=SYSTEM_PROMPT,
+            use_pro=use_pro
+            and (
+                self._consecutive_failures >= 2
+                or (step > 1 and s.confidence < gemini_cfg.gemini_auto_upgrade_threshold)
+            )
+        )
+        s.current_model = (
+            gemini_cfg.gemini_model_pro if use_pro else gemini_cfg.gemini_model_fast
+        )
+        if use_pro:
+            logger.info(
+                "[Auto-upgrade] Pro model selected (failures=%d, confidence=%.2f)",
+                self._consecutive_failures,
+                s.confidence,
+            )
+
+        s.api_calls += 1
+        raw_response = self._gemini.generate_with_image(
+            text_prompt=user_prompt,
+            image_bytes=screenshot_bytes,
+            system_instruction=SYSTEM_PROMPT,
+            use_pro=use_pro,
         )
 
         # 3. Parse response

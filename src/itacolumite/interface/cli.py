@@ -70,7 +70,17 @@ def _build_agent_panel(state) -> Panel:
 
     if state.next_action:
         lines.append(f"[green bold]Next Action:[/green bold] {state.next_action}")
-        lines.append(f"[bold]Confidence:[/bold] {state.confidence:.2f}")
+        conf_color = "red" if state.confidence < 0.3 else "yellow" if state.confidence < 0.6 else "green"
+        lines.append(f"[bold]Confidence:[/bold] [{conf_color}]{state.confidence:.2f}[/{conf_color}]")
+        if state.current_model:
+            is_pro = "pro" in state.current_model.lower()
+            model_tag = "[red bold]Pro ✦[/red bold]" if is_pro else "[dim]Flash[/dim]"
+            lines.append(f"[bold]Model:[/bold] {model_tag} [dim]{state.current_model}[/dim]state.confidence < 0.6 else "green"
+        lines.append(f"[bold]Confidence:[/bold] [{conf_color}]{state.confidence:.2f}[/{conf_color}]")
+        if state.current_model:
+            is_pro = "pro" in state.current_model.lower()
+            model_tag = "[red bold]Pro ✦[/red bold]" if is_pro else "[dim]Flash[/dim]"
+            lines.append(f"[bold]Model:[/bold] {model_tag} [dim]{state.current_model}[/dim]")
         lines.append("")
 
     if state.last_result:
@@ -200,12 +210,26 @@ def status() -> None:
     table.add_column("Property", style="cyan")
     table.add_column("Value", style="white")
 
-    table.add_row("Shell", settings.agent.shell_executable)
+    table.add_row("Shell",Fast Model", settings.gemini.gemini_model_fast)
+    table.add_row("Gemini Pro Model", settings.gemini.gemini_model_pro)
+    auto = settings.gemini.gemini_auto_upgrade
+    threshold = settings.gemini.gemini_auto_upgrade_threshold
+    table.add_row(
+        "Auto Upgrade",
+        f"[green]enabled[/green] (conf<{threshold} or failures≥2)" if auto else "[dim]disabled[/dim]",
+    
     table.add_row("Max Steps", str(settings.agent.agent_max_steps))
     table.add_row("Control Pipe", f"\\\\.\\pipe\\{settings.agent.control_pipe_name}")
     table.add_row("DPI Awareness", settings.agent.dpi_awareness)
     table.add_row("Capture Target", settings.agent.capture_target)
-    table.add_row("Gemini Model", settings.gemini.gemini_model)
+    table.add_row("Gemini Fast Model", settings.gemini.gemini_model_fast)
+    table.add_row("Gemini Pro Model", settings.gemini.gemini_model_pro)
+    auto = settings.gemini.gemini_auto_upgrade
+    threshold = settings.gemini.gemini_auto_upgrade_threshold
+    table.add_row(
+        "Auto Upgrade",
+        f"[green]enabled[/green] (conf<{threshold} or failures≥2)" if auto else "[dim]disabled[/dim]",
+    )
     table.add_row("Screenshot Delay", f"{settings.agent.screenshot_delay_ms}ms")
     table.add_row("Action Delay", f"{settings.agent.action_delay_ms}ms")
 
