@@ -5,14 +5,13 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from pathlib import Path
 
 import click
 from rich.console import Console
-from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
-from rich.text import Text
 
 from itacolumite.ai.gemini_client import GeminiClient, is_placeholder_api_key
 from itacolumite.config.settings import get_settings
@@ -282,6 +281,59 @@ def screenshot() -> None:
 
 
 @cli.group()
+def grounding() -> None:
+    """Grounding utilities and telemetry reports."""
+    pass
+
+
+@grounding.command(name="extract-text")
+@click.option("--output-name", default=None, help="Provider JSON file name under agent-data/grounding/providers")
+@click.option("--pro/--fast", "use_pro", default=True, help="Use the Pro or Fast Gemini vision model")
+def grounding_extract_text(output_name: str | None, use_pro: bool) -> None:
+    """Capture the current screen and generate a grounding provider JSON file."""
+    settings = get_settings()
+    _ensure_gemini_ready(settings.gemini.gemini_api_key)
+    provider_path, item_count, screenshot_path = _capture_grounding_text_provider(output_name, use_pro=use_pro)
+    console.print("[green]✓ Grounding provider saved[/green]")
+    click.echo(f"Provider path: {provider_path}")
+    click.echo(f"Screenshot path: {screenshot_path}")
+    click.echo(f"Anchors: {item_count}")
+
+
+@grounding.command(name="run-omniparser")
+@click.option("--output-name", default=None, help="Provider JSON file name under agent-data/grounding/providers")
+def grounding_run_omniparser(output_name: str | None) -> None:
+    """Capture the current screen and generate an OmniParser provider JSON file."""
+    provider_path, item_count, screenshot_path = _capture_omniparser_provider(output_name)
+    console.print("[green]✓ OmniParser provider saved[/green]")
+    click.echo(f"Provider path: {provider_path}")
+    click.echo(f"Screenshot path: {screenshot_path}")
+    click.echo(f"Anchors: {item_count}")
+
+
+@grounding.command(name="report")
+@click.option(
+    "--events-path",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+    help="Optional path to a validation_events.jsonl file",
+)
+@click.option(
+    "--output",
+    "output_path",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+    help="Optional HTML report output path",
+)
+def grounding_report(events_path: Path | None, output_path: Path | None) -> None:
+    """Summarize grounding validation telemetry and write an HTML report."""
+    report_path, summary = _build_grounding_report(events_path, output_path)
+    _print_grounding_summary(summary)
+    console.print("[green]✓ Grounding report saved[/green]")
+    click.echo(f"Report path: {report_path}")
+
+
+@cli.group()
 def control() -> None:
     """Send control commands to a running agent (via Named Pipe)."""
     pass
@@ -333,3 +385,140 @@ def _send_control(command: str) -> None:
     except Exception as e:
         console.print(f"[red]✗ Failed to connect to pipe: {e}[/red]")
         console.print("[dim]Is the agent running?[/dim]")
+
+
+def _capture_grounding_text_provider(
+    output_name: str | None,
+    *,
+    use_pro: bool,
+) -> tuple[Path, int, Path]:
+    """Capture the current screen and write a provider file for grounding support."""
+    from itacolumite.ai.gemini_client import GeminiClient
+    from itacolumite.core.grounding_capture import (
+        GeminiGroundingExtractor,
+        save_grounding_capture_image,
+        write_grounding_provider_payload,
+    )
+    from itacolumite.perception.screen import ScreenCapture
+
+    settings = get_settings()
+    screen = ScreenCapture()
+    screenshot_bytes, capture_context = screen.capture_bytes_with_context()
+    screenshot_path = save_grounding_capture_image(
+        settings.agent_data_dir,
+        screenshot_bytes,
+        timestamp=capture_context.timestamp,
+    )
+    extractor = GeminiGroundingExtractor(GeminiClient())
+    payload = extractor.extract_provider_payload(
+        image_bytes=screenshot_bytes,
+        capture_context=capture_context,
+        use_pro=use_pro,
+        max_items=settings.grounding.grounding_gemini_ocr_max_items,
+        source_image_path=screenshot_path,
+    )
+    provider_path = write_grounding_provider_payload(
+        settings.agent_data_dir / settings.grounding.grounding_provider_inputs_subdir,
+        payload,
+        output_name=output_name or settings.grounding.grounding_gemini_ocr_output_name,
+    )
+    return provider_path, len(payload.get("items") or []), screenshot_path
+
+
+def _capture_omniparser_provider(output_name: str | None) -> tuple[Path, int, Path]:
+    """Capture the current screen and write an OmniParser provider file."""
+    from itacolumite.core.grounding_capture import (
+        save_grounding_capture_image,
+        write_grounding_provider_payload,
+    )
+    from itacolumite.core.omniparser_runner import OmniParserRunner
+    from itacolumite.perception.screen import ScreenCapture
+
+    settings = get_settings()
+    runner = OmniParserRunner.from_settings(settings)
+    if not runner.is_configured:
+        raise click.ClickException("GROUNDING_OMNIPARSER_COMMAND is not configured")
+
+    screen = ScreenCapture()
+    screenshot_bytes, capture_context = screen.capture_bytes_with_context()
+    screenshot_path = save_grounding_capture_image(
+        settings.agent_data_dir,
+        screenshot_bytes,
+        timestamp=capture_context.timestamp,
+    )
+    payload = runner.extract_provider_payload(
+        image_path=screenshot_path,
+        capture_context=capture_context,
+    )
+    provider_path = write_grounding_provider_payload(
+        settings.agent_data_dir / settings.grounding.grounding_provider_inputs_subdir,
+        payload,
+        output_name=output_name or settings.grounding.grounding_omniparser_output_name,
+    )
+    return provider_path, len(payload.get("items") or []), screenshot_path
+
+
+def _build_grounding_report(
+    events_path: Path | None,
+    output_path: Path | None,
+) -> tuple[Path, object]:
+    """Load telemetry, render an HTML report, and return the output path and summary."""
+    from itacolumite.core.grounding_report import (
+        load_grounding_events,
+        render_grounding_report_html,
+        summarize_grounding_events,
+        write_grounding_report,
+    )
+
+    settings = get_settings()
+    resolved_events = events_path or (settings.agent_data_dir / "grounding" / "validation_events.jsonl")
+    if not resolved_events.exists():
+        raise click.ClickException(f"Grounding events file not found: {resolved_events}")
+
+    summary = summarize_grounding_events(
+        load_grounding_events(resolved_events),
+        events_path=resolved_events,
+    )
+    resolved_output = output_path or (
+        settings.agent_data_dir / settings.grounding.grounding_reports_subdir / "grounding_report.html"
+    )
+    write_grounding_report(resolved_output, render_grounding_report_html(summary))
+    return resolved_output, summary
+
+
+def _print_grounding_summary(summary: object) -> None:
+    """Render a concise console summary for grounding telemetry."""
+    metrics = Table(title="Grounding Telemetry")
+    metrics.add_column("Metric", style="cyan")
+    metrics.add_column("Value", style="white")
+    metrics.add_row("Events", str(summary.total_events))
+    metrics.add_row(
+        "Validations",
+        f"{summary.total_validations} total / {summary.approved_validations} approved / {summary.blocked_validations} blocked",
+    )
+    metrics.add_row("Approval rate", f"{summary.approval_rate:.1%}")
+    metrics.add_row(
+        "Outcomes",
+        f"{summary.total_outcomes} total / {summary.successful_outcomes} success",
+    )
+    metrics.add_row(
+        "Outcome success rate",
+        f"{summary.success_rate:.1%}" if summary.success_rate is not None else "n/a",
+    )
+    metrics.add_row(
+        "Average score",
+        f"{summary.average_score:.3f}" if summary.average_score is not None else "n/a",
+    )
+    metrics.add_row(
+        "Average diff ratio",
+        f"{summary.average_diff_ratio:.4f}" if summary.average_diff_ratio is not None else "n/a",
+    )
+    console.print(metrics)
+
+    if summary.reason_counts:
+        reasons = Table(title="Top Grounding Reasons")
+        reasons.add_column("Reason", style="magenta")
+        reasons.add_column("Count", justify="right")
+        for label, count in summary.reason_counts:
+            reasons.add_row(label, str(count))
+        console.print(reasons)

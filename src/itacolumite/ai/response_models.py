@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -23,9 +22,19 @@ class ActionParams(BaseModel):
     y1: int | None = None
     x2: int | None = None
     y2: int | None = None
+    center_norm: list[float] | None = None
+    bbox_norm: list[float] | None = None
+    start_center_norm: list[float] | None = None
+    start_bbox_norm: list[float] | None = None
+    end_center_norm: list[float] | None = None
+    end_bbox_norm: list[float] | None = None
     button: str | None = None
     direction: str | None = None
     amount: int | None = None
+    target_description: str | None = None
+    start_target_description: str | None = None
+    end_target_description: str | None = None
+    validation_note: str | None = None
 
     # Keyboard/text actions
     text: str | None = None
@@ -43,6 +52,24 @@ class ActionParams(BaseModel):
 
     # Task complete
     result: str | None = None
+
+    @field_validator("center_norm", "start_center_norm", "end_center_norm")
+    @classmethod
+    def _validate_center_norm(cls, value: list[float] | None) -> list[float] | None:
+        if value is None:
+            return None
+        if len(value) != 2:
+            raise ValueError("center_norm must contain exactly 2 values")
+        return [float(item) for item in value]
+
+    @field_validator("bbox_norm", "start_bbox_norm", "end_bbox_norm")
+    @classmethod
+    def _validate_bbox_norm(cls, value: list[float] | None) -> list[float] | None:
+        if value is None:
+            return None
+        if len(value) != 4:
+            raise ValueError("bbox_norm must contain exactly 4 values")
+        return [float(item) for item in value]
 
 
 class AgentAction(BaseModel):

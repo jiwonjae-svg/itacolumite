@@ -19,10 +19,23 @@ from itacolumite.ai.gemini_client import GeminiClient
 from itacolumite.ai.prompts.system import SYSTEM_PROMPT, build_observe_prompt
 from itacolumite.ai.response_models import AgentResponse, parse_agent_response
 from itacolumite.config.settings import get_settings
+from itacolumite.core.coordinate_validation import (
+    ValidationConfig,
+    needs_coordinate_validation,
+    validate_action_coordinates,
+)
 from itacolumite.core.executor import ActionExecutor, ExecutionResult
+from itacolumite.core.grounding_capture import (
+    GeminiGroundingExtractor,
+    save_grounding_capture_image,
+    write_grounding_provider_payload,
+)
+from itacolumite.core.omniparser_runner import OmniParserRunner
+from itacolumite.core.grounding_providers import build_default_grounding_providers
+from itacolumite.core.grounding_telemetry import GroundingTelemetryLogger
 from itacolumite.core.memory import ActionRecord, Memory
 from itacolumite.interface.control_server import ControlCommand, ControlMessage, ControlServer
-from itacolumite.perception.screen import ScreenCapture
+from itacolumite.perception.screen import CaptureContext, ScreenCapture
 from itacolumite.perception.state import StateCollector
 
 logger = logging.getLogger(__name__)
@@ -32,7 +45,6 @@ logger = logging.getLogger(__name__)
 _MAX_CONSECUTIVE_FAILURES = 5
 _MAX_IDENTICAL_ACTIONS = 4
 _LOOP_HISTORY_SIZE = 10
-_NOOP_DIFF_THRESHOLD = 0.002  # below this fraction of changed pixels → no visual effect
 
 
 @dataclass
@@ -111,6 +123,25 @@ class Agent:
         # Error recovery
         self._consecutive_failures = 0
         self._recent_actions: deque[StepSnapshot] = deque(maxlen=_LOOP_HISTORY_SIZE)
+        self._grounding_config = ValidationConfig(
+            require_bbox=self._settings.grounding.grounding_require_bbox,
+            min_confidence=self._settings.grounding.grounding_min_confidence,
+            edge_margin_px=self._settings.grounding.grounding_edge_margin_px,
+            min_bbox_size_px=self._settings.grounding.grounding_min_bbox_size_px,
+            max_repeat_failures=self._settings.grounding.grounding_max_repeat_failures,
+        )
+        self._grounding_providers = build_default_grounding_providers(self._settings)
+        self._grounding_telemetry = GroundingTelemetryLogger(self._settings.agent_data_dir)
+        self._grounding_extractor = (
+            GeminiGroundingExtractor(self._gemini)
+            if self._settings.grounding.grounding_enable_gemini_ocr_provider
+            else None
+        )
+        self._omniparser_runner = (
+            OmniParserRunner.from_settings(self._settings)
+            if self._settings.grounding.grounding_enable_omniparser_runner
+            else None
+        )
 
     @property
     def state(self) -> AgentState:
@@ -276,7 +307,7 @@ class Agent:
         logger.info("─── Step %d ───", step)
 
         # 1. OBSERVE: Capture screen + internal state
-        screenshot_bytes = self._screen.capture_bytes()
+        screenshot_bytes, capture_context = self._screen.capture_bytes_with_context()
         internal_state = self._state_collector.collect(task_type=self._infer_task_type(task))
         state_text = self._format_state(internal_state)
 
@@ -299,16 +330,21 @@ class Agent:
 
         # 2. ANALYZE + PLAN: Send to Gemini
         history_summary = self._memory.get_history_summary()
-        user_prompt = build_observe_prompt(task, history_summary, state_text + user_context)
+        screenshot_context = self._format_capture_context(capture_context)
+        user_prompt = build_observe_prompt(
+            task,
+            history_summary,
+            state_text + user_context,
+            screenshot_context,
+        )
 
         gemini_cfg = self._settings.gemini
-        use_pro = (
-            gemini_cfg.gemini_auto_upgrade
-            and (
+        use_pro = gemini_cfg.gemini_use_pro_for_vision
+        if not use_pro and gemini_cfg.gemini_auto_upgrade:
+            use_pro = (
                 self._consecutive_failures >= 2
                 or (step > 1 and s.confidence < gemini_cfg.gemini_auto_upgrade_threshold)
             )
-        )
         s.current_model = (
             gemini_cfg.gemini_model_pro if use_pro else gemini_cfg.gemini_model_fast
         )
@@ -365,6 +401,107 @@ class Agent:
         logger.info("Reasoning: %s", response.reasoning[:100] + "..." if len(response.reasoning) > 100 else response.reasoning)
         logger.info("Action: %s (confidence=%.2f)", response.next_action.type, response.confidence)
 
+        validation = None
+        pre_action_img = self._screen.last_screenshot
+        if needs_coordinate_validation(response.next_action.type):
+            self._maybe_refresh_grounding_providers(screenshot_bytes, capture_context)
+            validation = validate_action_coordinates(
+                response.next_action,
+                confidence=response.confidence,
+                capture_context=capture_context,
+                recent_records=self._memory.get_recent_history(),
+                config=self._grounding_config,
+                screenshot=pre_action_img,
+                task=task,
+                providers=self._grounding_providers,
+            )
+            self._grounding_telemetry.record_validation(
+                task_id=s.task_id,
+                step=step,
+                model=s.current_model,
+                confidence=response.confidence,
+                action=response.next_action,
+                validation=validation,
+            )
+            if response.next_action.type == "mouse_drag":
+                if validation.pixel_point is not None:
+                    response.next_action.params.x1 = validation.pixel_point[0]
+                    response.next_action.params.y1 = validation.pixel_point[1]
+                if validation.pixel_point_end is not None:
+                    response.next_action.params.x2 = validation.pixel_point_end[0]
+                    response.next_action.params.y2 = validation.pixel_point_end[1]
+            elif validation.pixel_point is not None:
+                response.next_action.params.x = validation.pixel_point[0]
+                response.next_action.params.y = validation.pixel_point[1]
+            if validation.retry_hint:
+                response.next_action.params.validation_note = validation.retry_hint
+            if not validation.approved:
+                logger.warning(
+                    "Coordinate validation blocked %s: %s",
+                    response.next_action.type,
+                    ", ".join(validation.reasons),
+                )
+                self._consecutive_failures += 1
+                s.consecutive_failures = self._consecutive_failures
+                s.last_result = f"FAIL: blocked by coordinate validation ({', '.join(validation.reasons)})"
+                if validation.retry_hint:
+                    self._user_messages.append(f"HINT: {validation.retry_hint}")
+                record = ActionRecord(
+                    step=step,
+                    timestamp=datetime.now().isoformat(),
+                    action_type=response.next_action.type,
+                    params=response.next_action.params.model_dump(exclude_none=True),
+                    observation=response.observation,
+                    reasoning=response.reasoning,
+                    confidence=response.confidence,
+                    result="blocked",
+                    verification=", ".join(validation.reasons),
+                    grounding={
+                        "score": validation.score,
+                        "reasons": validation.reasons,
+                        "provider_assessments": validation.provider_assessments,
+                    },
+                )
+                self._memory.record_action(record)
+                self._grounding_telemetry.record_outcome(
+                    task_id=s.task_id,
+                    step=step,
+                    action_type=response.next_action.type,
+                    result="blocked",
+                    success=False,
+                    diff_ratio=None,
+                    validation=validation,
+                )
+                self._save_checkpoint()
+                return ExecutionResult(
+                    success=False,
+                    action_type=response.next_action.type,
+                    error=f"coordinate validation blocked action: {', '.join(validation.reasons)}",
+                )
+
+            if response.next_action.type == "mouse_drag":
+                logger.info(
+                    "Coordinate validation approved %s from (%d, %d) to (%d, %d) score=%.2f",
+                    response.next_action.type,
+                    response.next_action.params.x1 if response.next_action.params.x1 is not None else -1,
+                    response.next_action.params.y1 if response.next_action.params.y1 is not None else -1,
+                    response.next_action.params.x2 if response.next_action.params.x2 is not None else -1,
+                    response.next_action.params.y2 if response.next_action.params.y2 is not None else -1,
+                    validation.score,
+                )
+            else:
+                logger.info(
+                    "Coordinate validation approved %s at (%d, %d) score=%.2f",
+                    response.next_action.type,
+                    response.next_action.params.x if response.next_action.params.x is not None else -1,
+                    response.next_action.params.y if response.next_action.params.y is not None else -1,
+                    validation.score,
+                )
+
+        s.next_action = (
+            f"{response.next_action.type}({response.next_action.params.model_dump(exclude_none=True)})"
+        )
+
         # Loop detection: check for repeated identical actions
         snapshot = StepSnapshot(
             action_type=response.next_action.type,
@@ -395,7 +532,40 @@ class Agent:
             self._consecutive_failures += 1
         s.consecutive_failures = self._consecutive_failures
 
-        # 5. VERIFY: Record and observe changes
+        # 5. VERIFY: Observe post-action changes and record the result
+        diff_ratio: float | None = None
+        if response.next_action.type not in ("wait", "task_complete", "shell_exec"):
+            img = self._screen.capture_after_action(save=True)
+            s.screenshot_path = f"agent-data/screenshots/screenshot_{self._screen.screenshot_count:05d}.png"
+
+            # Screenshot diff: detect no-op actions
+            if pre_action_img is not None and img is not None:
+                diff_ratio = self._screen.diff_ratio(pre_action_img, img)
+                if diff_ratio < self._settings.grounding.grounding_post_click_diff_threshold:
+                    logger.warning(
+                        "No-op detected: action %s produced <%.2f%% pixel change",
+                        response.next_action.type, diff_ratio * 100,
+                    )
+                    self._user_messages.append(
+                        f"HINT: Your last action ({response.next_action.type}) did not produce "
+                        "any visible change on screen. The action may have missed its target "
+                        "or had no effect. Consider a different approach."
+                    )
+
+        grounding_info = {}
+        if validation is not None:
+            grounding_info = {
+                "score": validation.score,
+                "reasons": validation.reasons,
+                "pixel_point": list(validation.pixel_point) if validation.pixel_point is not None else None,
+                "pixel_bbox": list(validation.pixel_bbox) if validation.pixel_bbox is not None else None,
+                "pixel_point_end": list(validation.pixel_point_end) if validation.pixel_point_end is not None else None,
+                "pixel_bbox_end": list(validation.pixel_bbox_end) if validation.pixel_bbox_end is not None else None,
+                "provider_assessments": validation.provider_assessments,
+            }
+            if diff_ratio is not None:
+                grounding_info["diff_ratio"] = diff_ratio
+
         record = ActionRecord(
             step=step,
             timestamp=datetime.now().isoformat(),
@@ -406,39 +576,22 @@ class Agent:
             confidence=response.confidence,
             result="success" if exec_result.success else "failure",
             verification=exec_result.output or exec_result.error,
+            grounding=grounding_info,
         )
         self._memory.record_action(record)
-
-        # Wait for screen to stabilize if it was a visual action
-        if response.next_action.type not in ("wait", "task_complete", "shell_exec"):
-            pre_action_img = self._screen.last_screenshot
-            img = self._screen.capture_after_action(save=True)
-            s.screenshot_path = f"agent-data/screenshots/screenshot_{self._screen.screenshot_count:05d}.png"
-
-            # Screenshot diff: detect no-op actions
-            if pre_action_img is not None and img is not None:
-                diff = self._screen.diff_ratio(pre_action_img, img)
-                if diff < _NOOP_DIFF_THRESHOLD:
-                    logger.warning(
-                        "No-op detected: action %s produced <%.2f%% pixel change",
-                        response.next_action.type, diff * 100,
-                    )
-                    self._user_messages.append(
-                        f"HINT: Your last action ({response.next_action.type}) did not produce "
-                        "any visible change on screen. The action may have missed its target "
-                        "or had no effect. Consider a different approach."
-                    )
+        if validation is not None:
+            self._grounding_telemetry.record_outcome(
+                task_id=s.task_id,
+                step=step,
+                action_type=response.next_action.type,
+                result="success" if exec_result.success else "failure",
+                success=exec_result.success,
+                diff_ratio=diff_ratio,
+                validation=validation,
+            )
 
         # Checkpoint: persist state so the task can be resumed
-        self._memory.save_checkpoint({
-            "confidence": s.confidence,
-            "consecutive_failures": self._consecutive_failures,
-            "api_calls": s.api_calls,
-            "actions_taken": s.actions_taken,
-            "prompt_tokens": s.prompt_tokens,
-            "completion_tokens": s.completion_tokens,
-            "total_tokens": s.total_tokens,
-        })
+        self._save_checkpoint()
 
         return exec_result
 
@@ -478,3 +631,106 @@ class Agent:
         for key, val in state.extra.items():
             lines.append(f"{key}: {val}")
         return "\n\n".join(lines)
+
+    def _format_capture_context(self, capture_context: CaptureContext) -> str:
+        """Format screenshot metadata for the model prompt."""
+        return (
+            f"Screenshot size: {capture_context.capture_width}x{capture_context.capture_height}\n"
+            f"Screen size: {capture_context.screen_width}x{capture_context.screen_height}\n"
+            f"Screen origin: ({capture_context.screen_left}, {capture_context.screen_top})\n"
+            f"Capture target: {capture_context.capture_target}\n"
+            "Return mouse grounding as normalized coordinates in the 0.0-1.0 range relative "
+            "to the screenshot."
+        )
+
+    def _maybe_refresh_grounding_providers(
+        self,
+        screenshot_bytes: bytes,
+        capture_context: CaptureContext,
+    ) -> None:
+        """Optionally refresh external grounding provider files for the current screenshot."""
+        self._maybe_refresh_gemini_grounding_provider(screenshot_bytes, capture_context)
+        self._maybe_refresh_omniparser_provider(screenshot_bytes, capture_context)
+
+    def _maybe_refresh_gemini_grounding_provider(
+        self,
+        screenshot_bytes: bytes,
+        capture_context: CaptureContext,
+    ) -> None:
+        """Optionally refresh the Gemini OCR provider file for the current screenshot."""
+        grounding = self._settings.grounding
+        if not grounding.grounding_enable_gemini_ocr_provider:
+            return
+        if not grounding.grounding_auto_refresh_gemini_ocr:
+            return
+        if self._grounding_extractor is None:
+            return
+
+        try:
+            self._agent_state.api_calls += 1
+            screenshot_path = save_grounding_capture_image(
+                self._settings.agent_data_dir,
+                screenshot_bytes,
+                timestamp=capture_context.timestamp,
+            )
+            payload = self._grounding_extractor.extract_provider_payload(
+                image_bytes=screenshot_bytes,
+                capture_context=capture_context,
+                use_pro=self._settings.gemini.gemini_use_pro_for_vision,
+                max_items=grounding.grounding_gemini_ocr_max_items,
+                source_image_path=screenshot_path,
+            )
+            provider_path = write_grounding_provider_payload(
+                self._settings.agent_data_dir / grounding.grounding_provider_inputs_subdir,
+                payload,
+                output_name=grounding.grounding_gemini_ocr_output_name,
+            )
+            logger.debug("Gemini OCR grounding provider refreshed: %s", provider_path)
+        except Exception as exc:
+            logger.warning("Gemini OCR grounding provider refresh failed: %s", exc)
+
+    def _maybe_refresh_omniparser_provider(
+        self,
+        screenshot_bytes: bytes,
+        capture_context: CaptureContext,
+    ) -> None:
+        """Optionally refresh the OmniParser provider file for the current screenshot."""
+        grounding = self._settings.grounding
+        if not grounding.grounding_enable_omniparser_runner:
+            return
+        if not grounding.grounding_auto_refresh_omniparser:
+            return
+        if self._omniparser_runner is None:
+            return
+
+        try:
+            screenshot_path = save_grounding_capture_image(
+                self._settings.agent_data_dir,
+                screenshot_bytes,
+                timestamp=capture_context.timestamp,
+            )
+            payload = self._omniparser_runner.extract_provider_payload(
+                image_path=screenshot_path,
+                capture_context=capture_context,
+            )
+            provider_path = write_grounding_provider_payload(
+                self._settings.agent_data_dir / grounding.grounding_provider_inputs_subdir,
+                payload,
+                output_name=grounding.grounding_omniparser_output_name,
+            )
+            logger.debug("OmniParser grounding provider refreshed: %s", provider_path)
+        except Exception as exc:
+            logger.warning("OmniParser grounding provider refresh failed: %s", exc)
+
+    def _save_checkpoint(self) -> None:
+        """Persist the current runtime counters for resume support."""
+        s = self._agent_state
+        self._memory.save_checkpoint({
+            "confidence": s.confidence,
+            "consecutive_failures": self._consecutive_failures,
+            "api_calls": s.api_calls,
+            "actions_taken": s.actions_taken,
+            "prompt_tokens": s.prompt_tokens,
+            "completion_tokens": s.completion_tokens,
+            "total_tokens": s.total_tokens,
+        })

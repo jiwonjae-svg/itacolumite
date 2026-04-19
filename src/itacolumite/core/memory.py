@@ -28,6 +28,7 @@ class ActionRecord:
     confidence: float
     result: str = ""  # "success", "failure", "blocked"
     verification: str = ""
+    grounding: dict[str, Any] = field(default_factory=dict)
 
     def summary(self) -> str:
         """One-line summary for prompt context."""

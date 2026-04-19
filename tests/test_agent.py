@@ -18,6 +18,7 @@ from itacolumite.core.agent import (
 )
 from itacolumite.core.executor import ExecutionResult
 from itacolumite.interface.control_server import ControlCommand, ControlMessage
+from itacolumite.perception.screen import CaptureContext
 
 
 # ---------------------------------------------------------------------------
@@ -38,12 +39,35 @@ def _make_agent() -> Agent:
         patch("itacolumite.core.agent.ShellController"),
         patch("itacolumite.core.agent.ClipboardController"),
         patch("itacolumite.core.agent.GeminiClient"),
+        patch("itacolumite.core.agent.GeminiGroundingExtractor") as mock_grounding_extractor,
+        patch("itacolumite.core.agent.OmniParserRunner") as mock_omniparser_runner,
+        patch("itacolumite.core.agent.save_grounding_capture_image"),
+        patch("itacolumite.core.agent.write_grounding_provider_payload"),
         patch("itacolumite.core.agent.Memory"),
+        patch("itacolumite.core.agent.GroundingTelemetryLogger"),
         patch("itacolumite.core.agent.ControlServer") as mock_cs,
     ):
         mock_cs.return_value.queue = Queue()
+        mock_grounding_extractor.return_value.extract_provider_payload.return_value = {
+            "provider": "gemini_ocr",
+            "items": [],
+        }
+        mock_omniparser_runner.from_settings.return_value.extract_provider_payload.return_value = {
+            "provider": "omniparser",
+            "items": [],
+        }
         agent = Agent()
     return agent
+
+
+def _capture_context() -> CaptureContext:
+    return CaptureContext(
+        screen_width=1920,
+        screen_height=1080,
+        capture_width=1920,
+        capture_height=1080,
+        timestamp=0.0,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +158,8 @@ class TestExecuteStep:
         agent = _make_agent()
         agent._consecutive_failures = 3
         agent._memory.next_step = MagicMock(return_value=1)
-        agent._screen.capture_bytes = MagicMock(return_value=b"png-data")
+        agent._memory.get_recent_history = MagicMock(return_value=[])
+        agent._screen.capture_bytes_with_context = MagicMock(return_value=(b"png-data", _capture_context()))
         agent._state_collector.collect = MagicMock(return_value=MagicMock(
             cwd="/test", foreground_window="VS Code", processes="", git_status=None, extra={},
         ))
@@ -151,7 +176,8 @@ class TestExecuteStep:
         agent = _make_agent()
         agent._consecutive_failures = 0
         agent._memory.next_step = MagicMock(return_value=1)
-        agent._screen.capture_bytes = MagicMock(return_value=b"png-data")
+        agent._memory.get_recent_history = MagicMock(return_value=[])
+        agent._screen.capture_bytes_with_context = MagicMock(return_value=(b"png-data", _capture_context()))
         agent._state_collector.collect = MagicMock(return_value=MagicMock(
             cwd="/test", foreground_window="VS Code", processes="", git_status=None, extra={},
         ))
@@ -168,7 +194,7 @@ class TestExecuteStep:
         agent = _make_agent()
         agent._memory.next_step = MagicMock(return_value=1)
         agent._memory.record_action = MagicMock()
-        agent._screen.capture_bytes = MagicMock(return_value=b"png-data")
+        agent._screen.capture_bytes_with_context = MagicMock(return_value=(b"png-data", _capture_context()))
         agent._state_collector.collect = MagicMock(return_value=MagicMock(
             cwd="/test", foreground_window="VS Code", processes="", git_status=None, extra={},
         ))
@@ -178,3 +204,63 @@ class TestExecuteStep:
         assert result.success is False
         assert result.action_type == "parse_error"
         assert agent._consecutive_failures == 1
+
+    def test_coordinate_validation_blocks_executor(self) -> None:
+        agent = _make_agent()
+        agent._memory.next_step = MagicMock(return_value=1)
+        agent._memory.get_recent_history = MagicMock(return_value=[])
+        agent._memory.record_action = MagicMock()
+        agent._executor.execute = MagicMock()
+        agent._screen.capture_bytes_with_context = MagicMock(return_value=(b"png-data", _capture_context()))
+        agent._state_collector.collect = MagicMock(return_value=MagicMock(
+            cwd="/test", foreground_window="VS Code", processes="", git_status=None, extra={},
+        ))
+        agent._gemini.generate_with_image = MagicMock(return_value='{"observation":"ok","reasoning":"r","plan":[],"next_action":{"type":"mouse_click","params":{"center_norm":[0.4,0.5]}},"confidence":0.9}')
+
+        result = agent._execute_step("test task")
+
+        assert result.success is False
+        assert "coordinate validation blocked" in result.error
+        agent._executor.execute.assert_not_called()
+
+    def test_normalized_coordinates_are_converted_before_execution(self) -> None:
+        agent = _make_agent()
+        agent._memory.next_step = MagicMock(return_value=1)
+        agent._memory.get_recent_history = MagicMock(return_value=[])
+        agent._screen.capture_bytes_with_context = MagicMock(return_value=(b"png-data", _capture_context()))
+        agent._state_collector.collect = MagicMock(return_value=MagicMock(
+            cwd="/test", foreground_window="VS Code", processes="", git_status=None, extra={},
+        ))
+        agent._gemini.generate_with_image = MagicMock(return_value='{"observation":"ok","reasoning":"r","plan":[],"next_action":{"type":"mouse_click","params":{"target_description":"Search","bbox_norm":[0.45,0.25,0.55,0.35],"center_norm":[0.5,0.3]}},"confidence":0.9}')
+        agent._executor.execute = MagicMock(return_value=ExecutionResult(success=True, action_type="mouse_click", output="clicked"))
+        agent._screen.capture_after_action = MagicMock(return_value=None)
+        agent._screen.screenshot_count = 1
+
+        result = agent._execute_step("test task")
+
+        assert result.success is True
+        executed_action = agent._executor.execute.call_args.args[0]
+        assert executed_action.params.x == 960
+        assert executed_action.params.y == 324
+
+    def test_drag_grounding_is_converted_before_execution(self) -> None:
+        agent = _make_agent()
+        agent._memory.next_step = MagicMock(return_value=1)
+        agent._memory.get_recent_history = MagicMock(return_value=[])
+        agent._screen.capture_bytes_with_context = MagicMock(return_value=(b"png-data", _capture_context()))
+        agent._state_collector.collect = MagicMock(return_value=MagicMock(
+            cwd="/test", foreground_window="VS Code", processes="", git_status=None, extra={},
+        ))
+        agent._gemini.generate_with_image = MagicMock(return_value='{"observation":"ok","reasoning":"r","plan":[],"next_action":{"type":"mouse_drag","params":{"start_target_description":"Task card","start_bbox_norm":[0.18,0.22,0.28,0.34],"start_center_norm":[0.23,0.28],"end_target_description":"Done column","end_bbox_norm":[0.72,0.18,0.90,0.82],"end_center_norm":[0.81,0.50]}},"confidence":0.9}')
+        agent._executor.execute = MagicMock(return_value=ExecutionResult(success=True, action_type="mouse_drag", output="dragged"))
+        agent._screen.capture_after_action = MagicMock(return_value=None)
+        agent._screen.screenshot_count = 1
+
+        result = agent._execute_step("test task")
+
+        assert result.success is True
+        executed_action = agent._executor.execute.call_args.args[0]
+        assert executed_action.params.x1 == 441
+        assert executed_action.params.y1 == 302
+        assert executed_action.params.x2 == 1554
+        assert executed_action.params.y2 == 540

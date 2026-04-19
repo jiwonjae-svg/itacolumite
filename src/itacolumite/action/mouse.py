@@ -8,6 +8,7 @@ import logging
 import time
 
 from itacolumite.config.settings import get_settings
+from itacolumite.perception.display import DesktopRegion, get_desktop_region
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ MOUSEEVENTF_MIDDLEUP = 0x0040
 MOUSEEVENTF_WHEEL = 0x0800
 MOUSEEVENTF_HWHEEL = 0x1000
 MOUSEEVENTF_ABSOLUTE = 0x8000
+MOUSEEVENTF_VIRTUALDESK = 0x4000
 
 WHEEL_DELTA = 120
 
@@ -64,46 +66,59 @@ def _send_mouse(flags: int, dx: int = 0, dy: int = 0, data: int = 0) -> None:
     user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
 
-def _to_abs(x: int, y: int) -> tuple[int, int]:
-    """주 모니터 pixel 좌표 → SendInput 정규화 좌표(0-65535).
+def _to_abs(x: int, y: int, region: DesktopRegion) -> tuple[int, int]:
+    """Desktop pixel 좌표를 SendInput 정규화 좌표(0-65535)로 변환한다.
 
     화면 범위를 벗어나는 좌표는 경계로 클램프하고 경고를 남긴다.
     """
-    sw = user32.GetSystemMetrics(0)  # SM_CXSCREEN
-    sh = user32.GetSystemMetrics(1)  # SM_CYSCREEN
-    clamped_x = max(0, min(x, sw - 1))
-    clamped_y = max(0, min(y, sh - 1))
+    clamped_x = max(region.left, min(x, region.right))
+    clamped_y = max(region.top, min(y, region.bottom))
     if clamped_x != x or clamped_y != y:
         logger.warning(
-            "Coordinate out of bounds: (%d, %d) clamped to (%d, %d) [screen %dx%d]",
-            x, y, clamped_x, clamped_y, sw, sh,
+            "Coordinate out of bounds: (%d, %d) clamped to (%d, %d) [region (%d,%d) %dx%d]",
+            x, y, clamped_x, clamped_y, region.left, region.top, region.width, region.height,
         )
-    abs_x = int(clamped_x * 65535 / max(sw - 1, 1))
-    abs_y = int(clamped_y * 65535 / max(sh - 1, 1))
+    abs_x = int((clamped_x - region.left) * 65535 / max(region.width - 1, 1))
+    abs_y = int((clamped_y - region.top) * 65535 / max(region.height - 1, 1))
     return abs_x, abs_y
+
+
+def _absolute_flags(region: DesktopRegion, *, include_move: bool) -> int:
+    flags = MOUSEEVENTF_ABSOLUTE
+    if include_move:
+        flags |= MOUSEEVENTF_MOVE
+    if region.is_virtual:
+        flags |= MOUSEEVENTF_VIRTUALDESK
+    return flags
 
 
 class MouseController:
     """SendInput 기반 마우스 제어."""
 
     def __init__(self) -> None:
-        self._action_delay = get_settings().agent.action_delay_ms / 1000.0
+        settings = get_settings()
+        self._action_delay = settings.agent.action_delay_ms / 1000.0
+        self._region = get_desktop_region(settings.agent.capture_target)
 
     def click(self, x: int, y: int, button: str = "left") -> None:
-        ax, ay = _to_abs(x, y)
+        ax, ay = _to_abs(x, y, self._region)
         down, up = _button_flags(button)
-        _send_mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, ax, ay)
-        _send_mouse(down | MOUSEEVENTF_ABSOLUTE, ax, ay)
-        _send_mouse(up | MOUSEEVENTF_ABSOLUTE, ax, ay)
+        absolute_move = _absolute_flags(self._region, include_move=True)
+        absolute_button = _absolute_flags(self._region, include_move=False)
+        _send_mouse(absolute_move, ax, ay)
+        _send_mouse(down | absolute_button, ax, ay)
+        _send_mouse(up | absolute_button, ax, ay)
         time.sleep(self._action_delay)
         logger.debug("click(%d, %d, %s)", x, y, button)
 
     def double_click(self, x: int, y: int) -> None:
-        ax, ay = _to_abs(x, y)
-        _send_mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, ax, ay)
+        ax, ay = _to_abs(x, y, self._region)
+        absolute_move = _absolute_flags(self._region, include_move=True)
+        absolute_button = _absolute_flags(self._region, include_move=False)
+        _send_mouse(absolute_move, ax, ay)
         for _ in range(2):
-            _send_mouse(MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_ABSOLUTE, ax, ay)
-            _send_mouse(MOUSEEVENTF_LEFTUP | MOUSEEVENTF_ABSOLUTE, ax, ay)
+            _send_mouse(MOUSEEVENTF_LEFTDOWN | absolute_button, ax, ay)
+            _send_mouse(MOUSEEVENTF_LEFTUP | absolute_button, ax, ay)
             time.sleep(0.05)
         time.sleep(self._action_delay)
         logger.debug("double_click(%d, %d)", x, y)
@@ -112,24 +127,26 @@ class MouseController:
         self.click(x, y, button="right")
 
     def move(self, x: int, y: int) -> None:
-        ax, ay = _to_abs(x, y)
-        _send_mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, ax, ay)
+        ax, ay = _to_abs(x, y, self._region)
+        _send_mouse(_absolute_flags(self._region, include_move=True), ax, ay)
 
     def drag(self, x1: int, y1: int, x2: int, y2: int) -> None:
-        ax1, ay1 = _to_abs(x1, y1)
-        ax2, ay2 = _to_abs(x2, y2)
-        _send_mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, ax1, ay1)
-        _send_mouse(MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_ABSOLUTE, ax1, ay1)
+        ax1, ay1 = _to_abs(x1, y1, self._region)
+        ax2, ay2 = _to_abs(x2, y2, self._region)
+        absolute_move = _absolute_flags(self._region, include_move=True)
+        absolute_button = _absolute_flags(self._region, include_move=False)
+        _send_mouse(absolute_move, ax1, ay1)
+        _send_mouse(MOUSEEVENTF_LEFTDOWN | absolute_button, ax1, ay1)
         time.sleep(0.1)
-        _send_mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, ax2, ay2)
+        _send_mouse(absolute_move, ax2, ay2)
         time.sleep(0.05)
-        _send_mouse(MOUSEEVENTF_LEFTUP | MOUSEEVENTF_ABSOLUTE, ax2, ay2)
+        _send_mouse(MOUSEEVENTF_LEFTUP | absolute_button, ax2, ay2)
         time.sleep(self._action_delay)
         logger.debug("drag(%d,%d → %d,%d)", x1, y1, x2, y2)
 
     def scroll(self, x: int, y: int, direction: str = "down", amount: int = 3) -> None:
-        ax, ay = _to_abs(x, y)
-        _send_mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, ax, ay)
+        ax, ay = _to_abs(x, y, self._region)
+        _send_mouse(_absolute_flags(self._region, include_move=True), ax, ay)
         if direction in ("up", "down"):
             delta = WHEEL_DELTA * amount * (1 if direction == "up" else -1)
             _send_mouse(MOUSEEVENTF_WHEEL, data=delta)

@@ -29,10 +29,18 @@ You MUST respond with valid JSON:
   "plan": ["Step 1 description", "Step 2 description"],
   "next_action": {
     "type": "action_type",
-    "params": { ... }
+    "params": {
+      "target_description": "Human-readable description of the intended target",
+      "bbox_norm": [x_min, y_min, x_max, y_max],
+      "center_norm": [x, y]
+    }
   },
   "confidence": 0.0 to 1.0
 }
+
+For mouse-based actions, `bbox_norm` and `center_norm` must be normalized to the screenshot size in the 0.0-1.0 range.
+For `mouse_drag`, return `start_target_description`, `start_bbox_norm`, `start_center_norm`, `end_target_description`, `end_bbox_norm`, and `end_center_norm`.
+Do not guess absolute pixel coordinates when a normalized bbox can be returned.
 
 ## Shell Execution Rules
 
@@ -51,15 +59,21 @@ Do NOT use free-form command strings. Pipeline operators (|, >, >>) and Invoke-E
 2. After each action, wait for a new screenshot to verify the result.
 3. If the result is unexpected, try an alternative approach.
 4. If confidence < 0.3, report uncertainty instead of guessing.
-5. Coordinates: (0,0) = top-left of primary monitor. Use pixel coordinates.
+5. Mouse grounding: return normalized coordinates relative to the screenshot, not absolute pixels. For `mouse_drag`, ground both the drag source and drag destination.
 6. When typing, be precise. Use key_combo for shortcuts.
 7. Prefer shell_exec over UI terminal typing whenever a task can be done safely without using an application UI.
   Examples: creating directories with mkdir, checking whether a path exists with Test-Path, listing files with Get-ChildItem/dir/ls, reading files, and running builds/tests/installers.
 8. Do NOT open a terminal and type a command manually if the same result can be achieved with a structured shell_exec action.
+9. If a clickable element is hard to localize, explain the ambiguity instead of guessing a click.
 """
 
 
-def build_observe_prompt(task: str, history_summary: str, internal_state: str) -> str:
+def build_observe_prompt(
+    task: str,
+    history_summary: str,
+    internal_state: str,
+    screenshot_context: str = "",
+) -> str:
     """Build the user-side prompt for the observe-analyze-act cycle."""
     return f"""\
 ## Current Task
@@ -70,6 +84,9 @@ def build_observe_prompt(task: str, history_summary: str, internal_state: str) -
 
 ## Internal State
 {internal_state}
+
+## Screenshot Context
+{screenshot_context or 'Use normalized coordinates relative to the current screenshot.'}
 
 ## Instructions
 Look at the current screenshot carefully. Describe what you see, decide what to do next, and respond with a single action in the required JSON format.

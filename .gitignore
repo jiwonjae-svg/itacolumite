@@ -8,8 +8,8 @@ build/
 *.egg
 
 # Virtual environment
-.venv/
-venv/
+.venv*/
+venv*/
 
 # IDE
 .vscode/
