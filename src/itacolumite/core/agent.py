@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 _MAX_CONSECUTIVE_FAILURES = 5
 _MAX_IDENTICAL_ACTIONS = 4
 _LOOP_HISTORY_SIZE = 10
+_NOOP_DIFF_THRESHOLD = 0.002  # below this fraction of changed pixels → no visual effect
 
 
 @dataclass
@@ -57,8 +58,7 @@ class AgentState:
     reasoning: str = ""
     plan: list[str] = field(default_factory=list)
     next_action: str = ""
-    confidence: float = 1.0       # 1.0 = 첫 스텝에서 무조건 Pro 전환 방지
-    current_model: str = ""       # 1.0 = 첫 스텝에서 무조건 Pro 전환 방지
+    confidence: float = 1.0
     current_model: str = ""
     last_result: str = ""
     screenshot_path: str = ""
@@ -66,6 +66,9 @@ class AgentState:
     actions_taken: int = 0
     consecutive_failures: int = 0
     start_time: float = 0.0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
 
 
 class Agent:
@@ -129,13 +132,34 @@ class Agent:
         self._control_server.stop()
         logger.info("Agent stopped.")
 
-    def run_task(self, task_description: str) -> str:
+    def run_task(self, task_description: str, *, resume_task_id: str | None = None) -> str:
         """Run a task to completion.
+
+        If *resume_task_id* is given, restore the checkpoint and continue from
+        where the previous run left off.
 
         Returns the task result string.
         """
-        task_id = f"task-{uuid.uuid4().hex[:8]}"
-        self._memory.start_task(task_id, task_description)
+        start_step = 0
+
+        if resume_task_id:
+            cp = Memory.load_checkpoint(resume_task_id)
+            if cp is None:
+                logger.error("No checkpoint found for %s", resume_task_id)
+                return "error: checkpoint_not_found"
+            task_id = resume_task_id
+            task_description = cp.get("description", task_description)
+            start_step = cp.get("step", 0)
+            self._memory.start_task(task_id, task_description)
+            # Restore history from checkpoint
+            for rec_dict in cp.get("actions", []):
+                self._memory.record_action(ActionRecord(**rec_dict))
+            self._memory._step_counter = start_step
+            logger.info("Resuming task %s from step %d", task_id, start_step)
+        else:
+            task_id = f"task-{uuid.uuid4().hex[:8]}"
+            self._memory.start_task(task_id, task_description)
+
         self._consecutive_failures = 0
         self._recent_actions.clear()
         self._user_messages.clear()
@@ -153,10 +177,11 @@ class Agent:
         logger.info("═" * 60)
 
         max_steps = self._settings.agent.agent_max_steps
+        remaining_steps = max_steps - start_step
         result = "max_steps_reached"
 
         try:
-            for _ in range(max_steps):
+            for _ in range(remaining_steps):
                 # Process control commands
                 self._process_control_commands()
 
@@ -198,7 +223,16 @@ class Agent:
             result = f"error: {e}"
             logger.exception("Task failed with error:")
         finally:
-            self._memory.end_task(result)
+            usage = self._gemini.usage
+            self._memory.end_task(
+                result,
+                token_usage={
+                    "total_calls": usage.total_calls,
+                    "prompt_tokens": usage.prompt_tokens,
+                    "completion_tokens": usage.completion_tokens,
+                    "total_tokens": usage.total_tokens,
+                },
+            )
             s.running = False
 
         logger.info("═" * 60)
@@ -246,6 +280,15 @@ class Agent:
         internal_state = self._state_collector.collect(task_type=self._infer_task_type(task))
         state_text = self._format_state(internal_state)
 
+        # Update focus guard: inform executor of the current foreground window
+        try:
+            from itacolumite.perception.window import get_foreground_window
+            winfo = get_foreground_window()
+            if winfo and winfo.title:
+                self._executor.set_expected_window(winfo.title)
+        except Exception:
+            pass  # non-critical — guard stays disabled
+
         # Inject user messages into context
         user_context = ""
         if self._user_messages:
@@ -257,7 +300,7 @@ class Agent:
         # 2. ANALYZE + PLAN: Send to Gemini
         history_summary = self._memory.get_history_summary()
         user_prompt = build_observe_prompt(task, history_summary, state_text + user_context)
-# Auto-upgrade to Pro when confidence is low or failures are accumulating
+
         gemini_cfg = self._settings.gemini
         use_pro = (
             gemini_cfg.gemini_auto_upgrade
@@ -281,29 +324,13 @@ class Agent:
             text_prompt=user_prompt,
             image_bytes=screenshot_bytes,
             system_instruction=SYSTEM_PROMPT,
-            use_pro=use_pro
-            and (
-                self._consecutive_failures >= 2
-                or (step > 1 and s.confidence < gemini_cfg.gemini_auto_upgrade_threshold)
-            )
-        )
-        s.current_model = (
-            gemini_cfg.gemini_model_pro if use_pro else gemini_cfg.gemini_model_fast
-        )
-        if use_pro:
-            logger.info(
-                "[Auto-upgrade] Pro model selected (failures=%d, confidence=%.2f)",
-                self._consecutive_failures,
-                s.confidence,
-            )
-
-        s.api_calls += 1
-        raw_response = self._gemini.generate_with_image(
-            text_prompt=user_prompt,
-            image_bytes=screenshot_bytes,
-            system_instruction=SYSTEM_PROMPT,
             use_pro=use_pro,
         )
+        # Update token usage in observable state
+        usage = self._gemini.usage
+        s.prompt_tokens = usage.prompt_tokens
+        s.completion_tokens = usage.completion_tokens
+        s.total_tokens = usage.total_tokens
 
         # 3. Parse response
         try:
@@ -384,8 +411,34 @@ class Agent:
 
         # Wait for screen to stabilize if it was a visual action
         if response.next_action.type not in ("wait", "task_complete", "shell_exec"):
+            pre_action_img = self._screen.last_screenshot
             img = self._screen.capture_after_action(save=True)
             s.screenshot_path = f"agent-data/screenshots/screenshot_{self._screen.screenshot_count:05d}.png"
+
+            # Screenshot diff: detect no-op actions
+            if pre_action_img is not None and img is not None:
+                diff = self._screen.diff_ratio(pre_action_img, img)
+                if diff < _NOOP_DIFF_THRESHOLD:
+                    logger.warning(
+                        "No-op detected: action %s produced <%.2f%% pixel change",
+                        response.next_action.type, diff * 100,
+                    )
+                    self._user_messages.append(
+                        f"HINT: Your last action ({response.next_action.type}) did not produce "
+                        "any visible change on screen. The action may have missed its target "
+                        "or had no effect. Consider a different approach."
+                    )
+
+        # Checkpoint: persist state so the task can be resumed
+        self._memory.save_checkpoint({
+            "confidence": s.confidence,
+            "consecutive_failures": self._consecutive_failures,
+            "api_calls": s.api_calls,
+            "actions_taken": s.actions_taken,
+            "prompt_tokens": s.prompt_tokens,
+            "completion_tokens": s.completion_tokens,
+            "total_tokens": s.total_tokens,
+        })
 
         return exec_result
 

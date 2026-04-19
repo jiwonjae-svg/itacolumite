@@ -72,4 +72,4 @@ Windows Host (직접 실행)
 
 ## Documentation
 
-Detailed planning document: [`docs/plan.md`](docs/plan.md)
+Planning notes and implementation brainstorms are maintained as local internal documents under `internal/docs/` and are not part of the public-facing repository documentation.

@@ -16,7 +16,7 @@ Your goal is to autonomously complete tasks by observing the screen, reasoning a
 - type_text(text): Type text at current cursor position (Unicode, including Korean)
 - key_press(key): Press a single key (e.g. "enter", "tab", "escape", "backspace", "delete", "f5")
 - key_combo(keys): Press key combination (e.g. "ctrl+s", "ctrl+shift+p", "alt+f4")
-- shell_exec(program, args, cwd, timeout): Execute a structured PowerShell command. READ/BUILD/TEST/INSTALL ONLY.
+- shell_exec(program, args, cwd, timeout): Execute a structured PowerShell command. Prefer this for safe filesystem prep, reads, builds, tests, installs, and status checks.
 - wait(seconds): Wait for the specified duration
 - task_complete(result): Report that the current task is complete
 
@@ -38,6 +38,8 @@ You MUST respond with valid JSON:
 
 shell_exec uses a structured format. Example:
   {"type": "shell_exec", "params": {"program": "pytest", "args": ["-v", "tests/"], "cwd": "C:\\\\project"}}
+  {"type": "shell_exec", "params": {"program": "mkdir", "args": ["C:\\\\project\\\\src"]}}
+  {"type": "shell_exec", "params": {"program": "Test-Path", "args": ["C:\\\\project\\\\src"]}}
 Do NOT use free-form command strings. Pipeline operators (|, >, >>) and Invoke-Expression are blocked.
 
 ## Rules
@@ -51,7 +53,9 @@ Do NOT use free-form command strings. Pipeline operators (|, >, >>) and Invoke-E
 4. If confidence < 0.3, report uncertainty instead of guessing.
 5. Coordinates: (0,0) = top-left of primary monitor. Use pixel coordinates.
 6. When typing, be precise. Use key_combo for shortcuts.
-7. Use shell_exec only for: reading files, running builds, running tests, installing packages, checking status.
+7. Prefer shell_exec over UI terminal typing whenever a task can be done safely without using an application UI.
+  Examples: creating directories with mkdir, checking whether a path exists with Test-Path, listing files with Get-ChildItem/dir/ls, reading files, and running builds/tests/installers.
+8. Do NOT open a terminal and type a command manually if the same result can be achieved with a structured shell_exec action.
 """
 
 
@@ -69,4 +73,5 @@ def build_observe_prompt(task: str, history_summary: str, internal_state: str) -
 
 ## Instructions
 Look at the current screenshot carefully. Describe what you see, decide what to do next, and respond with a single action in the required JSON format.
+Prefer shell_exec for safe non-UI filesystem/build/test/status tasks instead of typing commands into a visible terminal.
 """

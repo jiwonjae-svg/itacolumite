@@ -22,6 +22,13 @@ class TestClassifyRequest:
         ("node", ["--version"]),
         ("where.exe", ["python"]),
         ("whoami", []),
+        ("Test-Path", ["C:\\temp"]),
+        ("test-path", ["C:\\temp"]),
+        ("Get-ChildItem", ["C:\\temp"]),
+        ("dir", ["C:\\temp"]),
+        ("ls", ["C:\\temp"]),
+        ("mkdir", ["C:\\temp\\demo"]),
+        ("md", ["C:\\temp\\demo"]),
     ])
     def test_safe_requests(self, program: str, args: list[str]) -> None:
         assert classify_request(_req(program, args)) == RiskLevel.SAFE

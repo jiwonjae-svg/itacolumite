@@ -12,8 +12,15 @@ from itacolumite.action.keyboard import KeyboardController
 from itacolumite.action.mouse import MouseController
 from itacolumite.action.shell import ShellController, ShellRequest
 from itacolumite.ai.response_models import AgentAction, ActionParams
+from itacolumite.perception.window import get_foreground_window
 
 logger = logging.getLogger(__name__)
+
+# Actions that interact with the foreground UI and need a focus guard
+_FOCUS_SENSITIVE_ACTIONS = frozenset({
+    "mouse_click", "mouse_double_click", "mouse_move",
+    "mouse_drag", "mouse_scroll", "type_text", "key_press", "key_combo",
+})
 
 
 @dataclass
@@ -42,11 +49,40 @@ class ActionExecutor:
         self._keyboard = keyboard
         self._shell = shell
         self._clipboard = clipboard
+        self._expected_window: str | None = None
+
+    def set_expected_window(self, title_keyword: str | None) -> None:
+        """Set the expected foreground window keyword (or None to disable the guard)."""
+        self._expected_window = title_keyword
+
+    def _check_focus(self, action_type: str) -> ExecutionResult | None:
+        """Return an error result when the foreground window is unexpected, else None."""
+        if self._expected_window is None:
+            return None
+        if action_type not in _FOCUS_SENSITIVE_ACTIONS:
+            return None
+        try:
+            winfo = get_foreground_window()
+            if self._expected_window.lower() not in winfo.title.lower():
+                msg = (
+                    f"Focus guard: expected '{self._expected_window}' but "
+                    f"foreground is '{winfo.title}'"
+                )
+                logger.warning(msg)
+                return ExecutionResult(success=False, action_type=action_type, error=msg)
+        except Exception as e:
+            logger.debug("Focus guard check failed: %s", e)
+        return None
 
     def execute(self, action: AgentAction) -> ExecutionResult:
         """Execute a single agent action. Returns the result."""
         action_type = action.type.lower()
         params = action.params
+
+        # Focus guard: abort UI actions when the wrong window is active
+        focus_err = self._check_focus(action_type)
+        if focus_err is not None:
+            return focus_err
 
         try:
             handler = self._get_handler(action_type)

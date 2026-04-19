@@ -7,8 +7,24 @@ import time
 
 from itacolumite.action.keyboard import KeyboardController
 from itacolumite.action.mouse import MouseController
+from itacolumite.perception.screen import ScreenCapture
 
 logger = logging.getLogger(__name__)
+
+_POLL_INTERVAL = 1.0  # seconds between screenshots
+_STABLE_ROUNDS = 3    # consecutive unchanged frames to declare "done"
+_DIFF_THRESHOLD = 0.001  # fraction of changed pixels to count as "changed"
+
+
+def _frames_similar(a: bytes, b: bytes) -> bool:
+    """Return True if two PNG byte-buffers represent nearly identical images."""
+    if len(a) != len(b):
+        return False
+    if a == b:
+        return True
+    # Byte-level comparison: count differing bytes as a rough pixel-diff proxy.
+    diff_count = sum(1 for x, y in zip(a, b) if x != y)
+    return diff_count / max(len(a), 1) < _DIFF_THRESHOLD
 
 
 class CopilotTask:
@@ -27,9 +43,11 @@ class CopilotTask:
         self,
         keyboard: KeyboardController,
         mouse: MouseController,
+        screen: ScreenCapture | None = None,
     ) -> None:
         self._keyboard = keyboard
         self._mouse = mouse
+        self._screen = screen
 
     def open_chat(self) -> None:
         """Open the Copilot Chat panel via keyboard shortcut."""
@@ -56,13 +74,39 @@ class CopilotTask:
         self._keyboard.enter()
         logger.info("Copilot prompt sent: %s", prompt[:80] + "..." if len(prompt) > 80 else prompt)
 
-    def wait_for_response(self, timeout: float = 30.0) -> None:
+    def wait_for_response(self, timeout: float = 30.0) -> bool:
         """Wait for Copilot to finish generating a response.
 
-        In practice, the agent's main loop will capture a screenshot
-        after this delay and use Gemini to determine if Copilot is done.
+        Uses screenshot polling when a ScreenCapture instance is available:
+        captures frames every _POLL_INTERVAL seconds and considers the response
+        complete once _STABLE_ROUNDS consecutive frames are nearly identical.
+
+        Returns True if stability was detected, False if the timeout was hit.
+        Falls back to a fixed sleep when no screen capture is available.
         """
-        time.sleep(timeout)
+        if self._screen is None:
+            time.sleep(timeout)
+            return False
+
+        deadline = time.monotonic() + timeout
+        prev_bytes: bytes | None = None
+        stable_count = 0
+
+        while time.monotonic() < deadline:
+            frame = self._screen.capture_bytes()
+            if prev_bytes is not None and _frames_similar(prev_bytes, frame):
+                stable_count += 1
+                if stable_count >= _STABLE_ROUNDS:
+                    logger.info("Copilot response stabilised after %d rounds", stable_count)
+                    return True
+            else:
+                stable_count = 0
+            prev_bytes = frame
+            remaining = deadline - time.monotonic()
+            time.sleep(min(_POLL_INTERVAL, max(remaining, 0)))
+
+        logger.warning("Copilot response wait timed out after %.1fs", timeout)
+        return False
 
     def open_inline_chat(self) -> None:
         """Open inline Copilot Chat (Ctrl+I in editor)."""

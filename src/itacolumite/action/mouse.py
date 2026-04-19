@@ -65,11 +65,21 @@ def _send_mouse(flags: int, dx: int = 0, dy: int = 0, data: int = 0) -> None:
 
 
 def _to_abs(x: int, y: int) -> tuple[int, int]:
-    """주 모니터 pixel 좌표 → SendInput 정규화 좌표(0-65535)."""
+    """주 모니터 pixel 좌표 → SendInput 정규화 좌표(0-65535).
+
+    화면 범위를 벗어나는 좌표는 경계로 클램프하고 경고를 남긴다.
+    """
     sw = user32.GetSystemMetrics(0)  # SM_CXSCREEN
     sh = user32.GetSystemMetrics(1)  # SM_CYSCREEN
-    abs_x = int(x * 65535 / max(sw - 1, 1))
-    abs_y = int(y * 65535 / max(sh - 1, 1))
+    clamped_x = max(0, min(x, sw - 1))
+    clamped_y = max(0, min(y, sh - 1))
+    if clamped_x != x or clamped_y != y:
+        logger.warning(
+            "Coordinate out of bounds: (%d, %d) clamped to (%d, %d) [screen %dx%d]",
+            x, y, clamped_x, clamped_y, sw, sh,
+        )
+    abs_x = int(clamped_x * 65535 / max(sw - 1, 1))
+    abs_y = int(clamped_y * 65535 / max(sh - 1, 1))
     return abs_x, abs_y
 
 

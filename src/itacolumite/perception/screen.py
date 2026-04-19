@@ -8,6 +8,7 @@ import logging
 import time
 from pathlib import Path
 
+import numpy as np
 import win32con
 import win32gui
 import win32ui
@@ -100,3 +101,17 @@ class ScreenCapture:
     @property
     def screenshot_count(self) -> int:
         return self._screenshot_count
+
+    @staticmethod
+    def diff_ratio(img_a: Image.Image, img_b: Image.Image) -> float:
+        """두 이미지의 변경 픽셀 비율(0.0 ~ 1.0)을 반환한다.
+
+        크기가 다르면 1.0(완전 다름)을 반환한다.
+        """
+        if img_a.size != img_b.size:
+            return 1.0
+        arr_a = np.asarray(img_a)
+        arr_b = np.asarray(img_b)
+        # 채널별 차이가 있는 픽셀 수를 센다
+        changed = np.any(arr_a != arr_b, axis=-1)
+        return float(changed.sum()) / max(changed.size, 1)

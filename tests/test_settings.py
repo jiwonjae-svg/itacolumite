@@ -9,9 +9,6 @@ def test_default_settings() -> None:
     assert s.gemini.gemini_model_fast == "gemini-2.5-flash"
     assert s.gemini.gemini_model_pro == "gemini-2.5-pro"
     assert s.gemini.gemini_auto_upgrade is True
-    assert s.gemini.gemini_auto_upgrade_threshold == 0.3lash"
-    assert s.gemini.gemini_model_pro == "gemini-2.5-pro"
-    assert s.gemini.gemini_auto_upgrade is True
     assert s.gemini.gemini_auto_upgrade_threshold == 0.3
     assert s.agent.agent_max_steps == 200
     assert s.agent.shell_executable == "powershell.exe"

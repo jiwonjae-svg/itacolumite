@@ -38,12 +38,32 @@ def _has_metachar(token: str) -> bool:
     return bool(_META_CHARS.search(token))
 
 
+def _normalize_token(token: str) -> str:
+    return token.strip().casefold()
+
+
 # ── 정책 목록 ────────────────────────────────────────────────
 
+_PROGRAM_ALIASES: dict[str, str] = {
+    "ls": "get-childitem",
+    "dir": "get-childitem",
+    "cat": "get-content",
+    "type": "get-content",
+    "pwd": "get-location",
+    "md": "mkdir",
+}
+
+
+def _normalize_program(program: str) -> str:
+    normalized = _normalize_token(program)
+    return _PROGRAM_ALIASES.get(normalized, normalized)
+
+
 _SAFE_PROGRAMS: set[str] = {
-    "Get-ChildItem", "Get-Content", "Get-Location", "Set-Location",
-    "Test-Path", "Resolve-Path", "Get-Item", "Get-ItemProperty",
-    "Select-String", "Measure-Object", "Get-Process",
+    "get-childitem", "get-content", "get-location", "set-location",
+    "test-path", "resolve-path", "get-item", "get-itemproperty",
+    "select-string", "measure-object", "get-process",
+    "mkdir",
     "git", "python", "node",
     "where.exe", "whoami",
 }
@@ -58,17 +78,17 @@ _NORMAL_PROGRAMS: set[str] = {
 }
 
 _BLOCKED_PROGRAMS: set[str] = {
-    "Clear-Disk", "Format-Volume", "diskpart", "bcdedit", "sfc", "dism",
-    "Stop-Computer", "Restart-Computer", "shutdown", "logoff",
+    "clear-disk", "format-volume", "diskpart", "bcdedit", "sfc", "dism",
+    "stop-computer", "restart-computer", "shutdown", "logoff",
     "reg", "regedit",
-    "Invoke-Expression", "iex",
+    "invoke-expression", "iex",
     # 쉘 인터프리터 직접 호출 차단 (구조화된 명령 우회 방지)
     "cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe",
     "wscript", "cscript", "mshta",
 }
 
 _DANGEROUS_PROGRAMS: set[str] = {
-    "Remove-Item", "Stop-Process", "npm",  # npm publish 등
+    "remove-item", "stop-process", "npm",  # npm publish 등
 }
 
 
@@ -92,10 +112,10 @@ class ShellResult:
 
 def classify_request(request: ShellRequest) -> RiskLevel:
     """프로그램 + args 기반 리스크 분류."""
-    prog = request.program
+    prog = _normalize_program(request.program)
 
     # 메타 문자 검사
-    if _has_metachar(prog) or any(_has_metachar(a) for a in request.args):
+    if _has_metachar(request.program) or any(_has_metachar(a) for a in request.args):
         return RiskLevel.BLOCKED
 
     # Invoke-Expression 패턴
@@ -108,11 +128,12 @@ def classify_request(request: ShellRequest) -> RiskLevel:
     if prog in _SAFE_PROGRAMS:
         # git의 경우 서브커맨드 확인
         if prog == "git" and request.args:
-            if request.args[0] in _SAFE_GIT_SUBCOMMANDS:
+            subcommand = _normalize_token(request.args[0])
+            if subcommand in _SAFE_GIT_SUBCOMMANDS:
                 return RiskLevel.SAFE
-            if request.args[0] in ("add", "fetch"):
+            if subcommand in ("add", "fetch"):
                 return RiskLevel.NORMAL
-            if request.args[0] in ("commit", "push", "pull", "checkout", "switch", "reset", "rebase", "merge"):
+            if subcommand in ("commit", "push", "pull", "checkout", "switch", "reset", "rebase", "merge"):
                 return RiskLevel.DANGEROUS
             return RiskLevel.DANGEROUS
         return RiskLevel.SAFE
