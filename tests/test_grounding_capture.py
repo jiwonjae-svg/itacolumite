@@ -40,6 +40,26 @@ def test_parse_grounding_ocr_response_accepts_json_fences() -> None:
     assert anchors[0].center_norm == [0.5, 0.15]
 
 
+def test_parse_grounding_ocr_response_repairs_invalid_escape_sequences() -> None:
+    raw = r'''
+    {
+      "items": [
+        {
+          "text": "Path C:\Users\ongji\uBAD and Search",
+          "bbox_norm": [0.4, 0.1, 0.6, 0.2],
+          "center_norm": [0.5, 0.15],
+          "confidence": 0.91
+        }
+      ]
+    }
+    '''
+
+    anchors = parse_grounding_ocr_response(raw, max_items=10)
+
+    assert len(anchors) == 1
+    assert "Search" in anchors[0].text
+
+
 def test_write_grounding_provider_payload_writes_json(tmp_path) -> None:
     payload = {
         "provider": "gemini_ocr",

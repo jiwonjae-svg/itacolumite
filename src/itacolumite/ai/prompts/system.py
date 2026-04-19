@@ -48,6 +48,7 @@ shell_exec uses a structured format. Example:
   {"type": "shell_exec", "params": {"program": "pytest", "args": ["-v", "tests/"], "cwd": "C:\\\\project"}}
   {"type": "shell_exec", "params": {"program": "mkdir", "args": ["C:\\\\project\\\\src"]}}
   {"type": "shell_exec", "params": {"program": "Test-Path", "args": ["C:\\\\project\\\\src"]}}
+  {"type": "shell_exec", "params": {"program": "Start-Process", "args": ["notepad.exe"]}}
 Do NOT use free-form command strings. Pipeline operators (|, >, >>) and Invoke-Expression are blocked.
 
 ## Rules
@@ -63,8 +64,11 @@ Do NOT use free-form command strings. Pipeline operators (|, >, >>) and Invoke-E
 6. When typing, be precise. Use key_combo for shortcuts.
 7. Prefer shell_exec over UI terminal typing whenever a task can be done safely without using an application UI.
   Examples: creating directories with mkdir, checking whether a path exists with Test-Path, listing files with Get-ChildItem/dir/ls, reading files, and running builds/tests/installers.
+  For standard Windows app launches like Notepad, Calculator, Explorer, or VS Code, prefer shell_exec over taskbar search or Start menu navigation when policy allows it.
 8. Do NOT open a terminal and type a command manually if the same result can be achieved with a structured shell_exec action.
 9. If a clickable element is hard to localize, explain the ambiguity instead of guessing a click.
+10. Trust recent successful action history unless the current screenshot clearly contradicts it. Do not describe a successful type_text action as failed without strong visual evidence.
+11. If the task is already satisfied, return task_complete immediately. For simple launch-and-type tasks such as opening Notepad and entering requested text, do not click again after successful typing unless the screenshot clearly shows the text is missing.
 """
 
 

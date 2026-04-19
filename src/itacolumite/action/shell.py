@@ -75,6 +75,13 @@ _SAFE_GIT_SUBCOMMANDS: set[str] = {
 _NORMAL_PROGRAMS: set[str] = {
     "pytest", "pip", "npm", "cargo", "go", "dotnet", "make", "cmake",
     "java", "javac", "gradle", "mvn", "ruff", "mypy",
+    "code", "code.cmd", "code-insiders", "code-insiders.cmd",
+    "notepad", "notepad.exe", "calc", "calc.exe", "explorer", "explorer.exe",
+}
+
+_NORMAL_LAUNCH_TARGETS: set[str] = {
+    "code", "code.cmd", "code-insiders", "code-insiders.cmd",
+    "notepad", "notepad.exe", "calc", "calc.exe", "explorer", "explorer.exe",
 }
 
 _BLOCKED_PROGRAMS: set[str] = {
@@ -121,6 +128,16 @@ def classify_request(request: ShellRequest) -> RiskLevel:
     # Invoke-Expression 패턴
     if _BLOCKED_CMDLETS.search(prog) or any(_BLOCKED_CMDLETS.search(a) for a in request.args):
         return RiskLevel.BLOCKED
+
+    if prog == "start-process":
+        if not request.args:
+            return RiskLevel.DANGEROUS
+        target = _normalize_program(request.args[0])
+        if target in _BLOCKED_PROGRAMS:
+            return RiskLevel.BLOCKED
+        if target in _NORMAL_LAUNCH_TARGETS:
+            return RiskLevel.NORMAL
+        return RiskLevel.DANGEROUS
 
     if prog in _BLOCKED_PROGRAMS:
         return RiskLevel.BLOCKED

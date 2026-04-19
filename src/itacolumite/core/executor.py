@@ -12,7 +12,7 @@ from itacolumite.action.keyboard import KeyboardController
 from itacolumite.action.mouse import MouseController
 from itacolumite.action.shell import ShellController, ShellRequest
 from itacolumite.ai.response_models import AgentAction, ActionParams
-from itacolumite.perception.window import get_foreground_window
+from itacolumite.perception.window import WindowInfo, activate_window, find_window, get_foreground_window
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,16 @@ class ExecutionResult:
     task_result: str = ""
 
 
+@dataclass(frozen=True)
+class FocusTarget:
+    """Stable app/window signature captured during observation."""
+
+    hwnd: int
+    pid: int
+    class_name: str
+    title: str
+
+
 class ActionExecutor:
     """Executes agent actions by dispatching to the appropriate controller."""
 
@@ -49,23 +59,36 @@ class ActionExecutor:
         self._keyboard = keyboard
         self._shell = shell
         self._clipboard = clipboard
-        self._expected_window: str | None = None
+        self._expected_window: FocusTarget | None = None
 
-    def set_expected_window(self, title_keyword: str | None) -> None:
-        """Set the expected foreground window keyword (or None to disable the guard)."""
-        self._expected_window = title_keyword
+    def set_expected_window(self, window: WindowInfo | None) -> None:
+        """Set the expected foreground window signature (or None to disable the guard)."""
+        if window is None:
+            self._expected_window = None
+            return
+        self._expected_window = FocusTarget(
+            hwnd=window.hwnd,
+            pid=window.pid,
+            class_name=window.class_name,
+            title=window.title,
+        )
 
-    def _check_focus(self, action_type: str) -> ExecutionResult | None:
+    def _check_focus(self, action_type: str, params: ActionParams | None = None) -> ExecutionResult | None:
         """Return an error result when the foreground window is unexpected, else None."""
         if self._expected_window is None:
             return None
         if action_type not in _FOCUS_SENSITIVE_ACTIONS:
             return None
+        if _bypasses_focus_guard(action_type, params):
+            return None
         try:
             winfo = get_foreground_window()
-            if self._expected_window.lower() not in winfo.title.lower():
+            if not _matches_focus_target(self._expected_window, winfo):
+                restored = _try_restore_focus(self._expected_window)
+                if restored is not None and _matches_focus_target(self._expected_window, restored):
+                    return None
                 msg = (
-                    f"Focus guard: expected '{self._expected_window}' but "
+                    f"Focus guard: expected '{self._expected_window.title}' but "
                     f"foreground is '{winfo.title}'"
                 )
                 logger.warning(msg)
@@ -80,7 +103,7 @@ class ActionExecutor:
         params = action.params
 
         # Focus guard: abort UI actions when the wrong window is active
-        focus_err = self._check_focus(action_type)
+        focus_err = self._check_focus(action_type, params)
         if focus_err is not None:
             return focus_err
 
@@ -212,3 +235,40 @@ class ActionExecutor:
             task_complete=True,
             task_result=result,
         )
+
+
+def _matches_focus_target(expected: FocusTarget, current: WindowInfo) -> bool:
+    """Allow focus changes within the same top-level app window."""
+    if current.hwnd == expected.hwnd:
+        return True
+    return current.pid == expected.pid and current.class_name == expected.class_name
+
+
+def _bypasses_focus_guard(action_type: str, params: ActionParams | None) -> bool:
+    """Allow global Windows shortcuts to execute even if focus has drifted."""
+    if params is None:
+        return False
+    if action_type == "key_press":
+        return (params.key or "").strip().casefold() in {"win", "lwin", "rwin"}
+    if action_type == "key_combo":
+        parts = [part.strip().casefold() for part in (params.keys or "").replace("-", "+").split("+") if part.strip()]
+        return any(part in {"win", "lwin", "rwin"} for part in parts)
+    return False
+
+
+def _try_restore_focus(expected: FocusTarget) -> WindowInfo | None:
+    """Attempt to bring the expected app window back to the foreground once."""
+    target = find_window(
+        hwnd=expected.hwnd,
+        pid=expected.pid,
+        class_name=expected.class_name,
+        title=expected.title,
+    )
+    if target is None:
+        return None
+    if not activate_window(target):
+        return None
+    try:
+        return get_foreground_window()
+    except Exception:
+        return None

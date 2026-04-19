@@ -180,8 +180,6 @@ class FileBackedGroundingProvider:
             label = item["label"]
             candidate_tokens = _tokenize(label)
             similarity = _token_overlap_ratio(target_tokens, candidate_tokens)
-            if target_description.casefold() in label.casefold() or label.casefold() in target_description.casefold():
-                similarity = max(similarity, 1.0)
             if similarity > best_similarity:
                 best_similarity = similarity
                 best_match = item

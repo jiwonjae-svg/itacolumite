@@ -33,7 +33,13 @@ class ActionRecord:
     def summary(self) -> str:
         """One-line summary for prompt context."""
         p = json.dumps(self.params, ensure_ascii=False) if self.params else "{}"
-        return f"[Step {self.step}] {self.action_type}({p}) → {self.result}"
+        summary = f"[Step {self.step}] {self.action_type}({p}) → {self.result}"
+        if self.verification:
+            compact = " ".join(self.verification.split())
+            if len(compact) > 96:
+                compact = compact[:93] + "..."
+            summary += f" [{compact}]"
+        return summary
 
 
 class Memory:

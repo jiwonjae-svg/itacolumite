@@ -1,19 +1,5 @@
 # Itacolumite
 
-```text
-+------------------------------------------------------------------+
-|  III TTTT   A    CCCC  OOO   L    U   U M   M III TTTT EEEEE     |
-|   I    T   A A  C     O   O  L    U   U MM MM  I    T   E         |
-|   I    T  AAAAA C     O   O  L    U   U M M M  I    T   EEEE      |
-|   I    T  A   A C     O   O  L    U   U M   M  I    T   E         |
-|  III   T  A   A  CCCC  OOO   LLLL  UUU  M   M III   T   EEEEE     |
-|                                                                  |
-|        Autonomous computer-use agent on native Windows           |
-+------------------------------------------------------------------+
-```
-
-> **Itacolumite**(이타콜루마이트) — 유연한 사암처럼 단단하면서도 유연하게 적응하는 자율 컴퓨터 제어 AI 에이전트
-
 ## Overview
 
 Itacolumite는 **네이티브 Windows 컴퓨터**를 자율적으로 제어하는 AI 에이전트입니다.
@@ -115,11 +101,12 @@ To enable a local OmniParser executable, configure the command and argument temp
 GROUNDING_ENABLE_OMNIPARSER_RUNNER=true
 GROUNDING_AUTO_REFRESH_OMNIPARSER=true
 GROUNDING_OMNIPARSER_COMMAND=python
-GROUNDING_OMNIPARSER_ARGS=C:\\tools\\omniparser_cli.py --image "{image_path}" --output "{output_path}" --device cpu --batch-size 8 --imgsz 640
+GROUNDING_OMNIPARSER_ARGS=C:\\tools\\omniparser_cli.py --image "{image_path}" --output "{output_path}" --device cpu --batch-size 8 --imgsz 640 --log-path "{image_path}.omniparser.log"
 GROUNDING_OMNIPARSER_OUTPUT_NAME=omniparser_latest.json
 ```
 
 Start with `--device cpu --batch-size 8 --imgsz 640` for the first smoke test. After that is stable, move to `--device cuda` or a larger batch size gradually.
+The progress log is written next to the captured screenshot as `*.omniparser.log`, so if a run stalls you can inspect the last completed phase without attaching a debugger.
 
 If you use multiple monitors and want the agent to reason over the entire virtual desktop instead of only the primary display, set:
 

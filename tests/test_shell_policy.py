@@ -41,6 +41,9 @@ class TestClassifyRequest:
         ("npm", ["run", "build"]),
         ("pip", ["install", "flask"]),
         ("npm", ["install"]),
+        ("code", ["C:\\temp\\demo"]),
+        ("notepad.exe", []),
+        ("Start-Process", ["notepad.exe"]),
         ("git", ["add", "-A"]),
         ("git", ["fetch", "origin"]),
     ])
@@ -59,9 +62,13 @@ class TestClassifyRequest:
         ("git", ["reset", "--hard"]),
         ("git", ["rebase", "main"]),
         ("git", ["merge", "feature"]),
+        ("Start-Process", ["python.exe"]),
     ])
     def test_dangerous_requests(self, program: str, args: list[str]) -> None:
         assert classify_request(_req(program, args)) == RiskLevel.DANGEROUS
+
+    def test_start_process_blocked_target(self) -> None:
+        assert classify_request(_req("Start-Process", ["powershell.exe"])) == RiskLevel.BLOCKED
 
     # ── Blocked programs ─────────────────────────────────────
 

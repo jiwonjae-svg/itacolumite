@@ -316,7 +316,7 @@ class Agent:
             from itacolumite.perception.window import get_foreground_window
             winfo = get_foreground_window()
             if winfo and winfo.title:
-                self._executor.set_expected_window(winfo.title)
+                self._executor.set_expected_window(winfo)
         except Exception:
             pass  # non-critical — guard stays disabled
 
@@ -590,6 +590,16 @@ class Agent:
                 validation=validation,
             )
 
+        auto_complete_result = self._maybe_auto_complete_task(
+            task=task,
+            action=response.next_action,
+            exec_result=exec_result,
+            diff_ratio=diff_ratio,
+        )
+        if auto_complete_result is not None:
+            exec_result.task_complete = True
+            exec_result.task_result = auto_complete_result
+
         # Checkpoint: persist state so the task can be resumed
         self._save_checkpoint()
 
@@ -642,6 +652,43 @@ class Agent:
             "Return mouse grounding as normalized coordinates in the 0.0-1.0 range relative "
             "to the screenshot."
         )
+
+    def _maybe_auto_complete_task(
+        self,
+        *,
+        task: str,
+        action,
+        exec_result: ExecutionResult,
+        diff_ratio: float | None,
+    ) -> str | None:
+        """Auto-complete simple launch-and-type tasks after a successful text entry."""
+        if not exec_result.success:
+            return None
+        if action.type != "type_text":
+            return None
+
+        threshold = self._settings.grounding.grounding_post_click_diff_threshold
+        if diff_ratio is not None and diff_ratio < threshold:
+            return None
+
+        task_lower = task.casefold()
+        simple_markers = [
+            "메모장", "notepad", "입력", "타이핑", "써봐", "write", "type", "텍스트",
+        ]
+        complex_markers = [
+            "code", "코드", "vscode", "copilot", "build", "test", "git", "terminal",
+            "powershell", "project", "프로젝트", "folder", "폴더", "directory", "디렉터리",
+            "save", "저장", "browser", "브라우저", "chrome",
+        ]
+        if not any(marker in task_lower for marker in simple_markers):
+            return None
+        if any(marker in task_lower for marker in complex_markers):
+            return None
+
+        typed_text = (action.params.text or "").strip()
+        if not typed_text:
+            return None
+        return "Completed simple text entry task after successful typing."
 
     def _maybe_refresh_grounding_providers(
         self,

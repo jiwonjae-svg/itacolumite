@@ -402,6 +402,49 @@ def test_file_provider_refines_pixel_point_from_external_bbox(tmp_path) -> None:
     assert result.provider_assessments[0]["metadata"]["applied_refinement"] is True
 
 
+def test_file_provider_ignores_single_character_substring_false_positive(tmp_path) -> None:
+    action = AgentAction(
+        type="mouse_click",
+        params=ActionParams(
+            target_description="The File menu at the top left of the VS Code window",
+            bbox_norm=[0.01, 0.0, 0.025, 0.027],
+            center_norm=[0.018, 0.014],
+        ),
+    )
+    provider_dir = tmp_path / "grounding" / "providers"
+    provider_dir.mkdir(parents=True)
+    payload = {
+        "provider": "ocr",
+        "anchors": [
+            {
+                "text": "a",
+                "bbox_norm": [0.70, 0.70, 0.75, 0.75],
+                "center_norm": [0.725, 0.725],
+                "score": 0.99,
+            }
+        ],
+    }
+    (provider_dir / "ocr.json").write_text(json.dumps(payload), encoding="utf-8")
+    provider = FileBackedGroundingProvider(
+        provider_dir=provider_dir,
+        match_iou_threshold=0.3,
+    )
+
+    result = validate_action_coordinates(
+        action,
+        confidence=0.95,
+        capture_context=_capture_context(),
+        recent_records=[],
+        config=_config(),
+        screenshot=Image.new("RGB", (1920, 1080), color="gray"),
+        providers=[provider],
+    )
+
+    assert result.approved is True
+    assert "external_provider_conflict" not in result.reasons
+    assert result.provider_assessments == []
+
+
 def test_file_provider_refines_drag_end_pixel_point_from_external_bbox(tmp_path) -> None:
     action = AgentAction(
         type="mouse_drag",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -101,7 +102,14 @@ def parse_grounding_ocr_response(raw_response: str, *, max_items: int) -> list[G
     try:
         payload = json.loads(payload_text)
     except json.JSONDecodeError as exc:
-        raise ValueError(f"Invalid grounding OCR JSON: {exc}") from exc
+        repaired = _repair_common_json_escapes(payload_text)
+        if repaired != payload_text:
+            try:
+                payload = json.loads(repaired)
+            except json.JSONDecodeError as repaired_exc:
+                raise ValueError(f"Invalid grounding OCR JSON: {repaired_exc}") from repaired_exc
+        else:
+            raise ValueError(f"Invalid grounding OCR JSON: {exc}") from exc
 
     raw_items: Any
     if isinstance(payload, list):
@@ -183,6 +191,11 @@ def _strip_markdown_fences(text: str) -> str:
     if lines and lines[-1].strip().startswith("```"):
         lines = lines[:-1]
     return "\n".join(lines).strip()
+
+
+def _repair_common_json_escapes(text: str) -> str:
+    """Escape invalid backslashes so slightly malformed model JSON still parses."""
+    return re.sub(r'\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})', r'\\\\', text)
 
 
 def _coerce_bbox_norm(raw_bbox: Any) -> list[float] | None:

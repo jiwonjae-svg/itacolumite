@@ -264,3 +264,40 @@ class TestExecuteStep:
         assert executed_action.params.y1 == 302
         assert executed_action.params.x2 == 1554
         assert executed_action.params.y2 == 540
+
+    def test_auto_completes_simple_notepad_typing_task(self) -> None:
+        agent = _make_agent()
+        agent._memory.next_step = MagicMock(return_value=1)
+        agent._memory.get_recent_history = MagicMock(return_value=[])
+        agent._screen.capture_bytes_with_context = MagicMock(return_value=(b"png-data", _capture_context()))
+        agent._state_collector.collect = MagicMock(return_value=MagicMock(
+            cwd="/test", foreground_window="Notepad", processes="", git_status=None, extra={},
+        ))
+        agent._gemini.generate_with_image = MagicMock(return_value='{"observation":"ok","reasoning":"r","plan":[],"next_action":{"type":"type_text","params":{"text":"안녕하세요"}},"confidence":1.0}')
+        agent._executor.execute = MagicMock(return_value=ExecutionResult(success=True, action_type="type_text", output="Typed 5 chars"))
+        agent._screen.capture_after_action = MagicMock(return_value=None)
+        agent._screen.screenshot_count = 1
+
+        result = agent._execute_step("메모장을 열고 안녕하세요 라고 써봐")
+
+        assert result.success is True
+        assert result.task_complete is True
+        assert result.task_result == "Completed simple text entry task after successful typing."
+
+    def test_does_not_auto_complete_coding_typing_task(self) -> None:
+        agent = _make_agent()
+        agent._memory.next_step = MagicMock(return_value=1)
+        agent._memory.get_recent_history = MagicMock(return_value=[])
+        agent._screen.capture_bytes_with_context = MagicMock(return_value=(b"png-data", _capture_context()))
+        agent._state_collector.collect = MagicMock(return_value=MagicMock(
+            cwd="/test", foreground_window="VS Code", processes="", git_status=None, extra={},
+        ))
+        agent._gemini.generate_with_image = MagicMock(return_value='{"observation":"ok","reasoning":"r","plan":[],"next_action":{"type":"type_text","params":{"text":"hello"}},"confidence":1.0}')
+        agent._executor.execute = MagicMock(return_value=ExecutionResult(success=True, action_type="type_text", output="Typed 5 chars"))
+        agent._screen.capture_after_action = MagicMock(return_value=None)
+        agent._screen.screenshot_count = 1
+
+        result = agent._execute_step("VS Code에서 Copilot Chat에 hello 를 입력해")
+
+        assert result.success is True
+        assert result.task_complete is False

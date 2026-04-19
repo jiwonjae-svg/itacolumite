@@ -46,3 +46,22 @@ def test_memory_task_lifecycle() -> None:
 def test_history_summary_empty() -> None:
     mem = Memory()
     assert mem.get_history_summary() == "No actions taken yet."
+
+
+def test_action_summary_includes_verification_snippet() -> None:
+    record = ActionRecord(
+        step=1,
+        timestamp="2024-01-01T00:00:00",
+        action_type="type_text",
+        params={"text": "안녕하세요"},
+        observation="test",
+        reasoning="test",
+        confidence=1.0,
+        result="success",
+        verification="Typed 5 chars",
+    )
+
+    summary = record.summary()
+
+    assert "type_text" in summary
+    assert "Typed 5 chars" in summary

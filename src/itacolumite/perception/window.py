@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+import win32con
 import win32gui
 import win32process
 
@@ -68,3 +69,37 @@ def find_window_by_title(keyword: str) -> WindowInfo | None:
         if keyword_lower in w.title.lower():
             return w
     return None
+
+
+def find_window(
+    *,
+    hwnd: int | None = None,
+    pid: int | None = None,
+    class_name: str | None = None,
+    title: str | None = None,
+) -> WindowInfo | None:
+    """Find a visible window that matches a stable signature."""
+    title_lower = title.lower() if title else None
+    for window in list_visible_windows():
+        if hwnd is not None and window.hwnd == hwnd:
+            return window
+        if pid is not None and window.pid != pid:
+            continue
+        if class_name is not None and window.class_name != class_name:
+            continue
+        if title_lower is not None and title_lower not in window.title.lower():
+            continue
+        return window
+    return None
+
+
+def activate_window(window: WindowInfo) -> bool:
+    """Try to bring a visible window to the foreground."""
+    try:
+        win32gui.ShowWindow(window.hwnd, win32con.SW_RESTORE)
+        win32gui.BringWindowToTop(window.hwnd)
+        win32gui.SetForegroundWindow(window.hwnd)
+    except Exception as exc:
+        logger.debug("Failed to activate window %s: %s", window.title, exc)
+        return False
+    return True
