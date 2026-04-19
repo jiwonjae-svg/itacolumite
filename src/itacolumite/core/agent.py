@@ -590,15 +590,11 @@ class Agent:
                 validation=validation,
             )
 
-        auto_complete_result = self._maybe_auto_complete_task(
+        self._maybe_queue_post_typing_verification_hint(
             task=task,
             action=response.next_action,
             exec_result=exec_result,
-            diff_ratio=diff_ratio,
         )
-        if auto_complete_result is not None:
-            exec_result.task_complete = True
-            exec_result.task_result = auto_complete_result
 
         # Checkpoint: persist state so the task can be resumed
         self._save_checkpoint()
@@ -653,23 +649,18 @@ class Agent:
             "to the screenshot."
         )
 
-    def _maybe_auto_complete_task(
+    def _maybe_queue_post_typing_verification_hint(
         self,
         *,
         task: str,
         action,
         exec_result: ExecutionResult,
-        diff_ratio: float | None,
-    ) -> str | None:
-        """Auto-complete simple launch-and-type tasks after a successful text entry."""
+    ) -> None:
+        """Guide the model to verify visible text after simple typing tasks."""
         if not exec_result.success:
-            return None
+            return
         if action.type != "type_text":
-            return None
-
-        threshold = self._settings.grounding.grounding_post_click_diff_threshold
-        if diff_ratio is not None and diff_ratio < threshold:
-            return None
+            return
 
         task_lower = task.casefold()
         simple_markers = [
@@ -681,14 +672,17 @@ class Agent:
             "save", "저장", "browser", "브라우저", "chrome",
         ]
         if not any(marker in task_lower for marker in simple_markers):
-            return None
+            return
         if any(marker in task_lower for marker in complex_markers):
-            return None
+            return
 
         typed_text = (action.params.text or "").strip()
         if not typed_text:
-            return None
-        return "Completed simple text entry task after successful typing."
+            return
+
+        self._user_messages.append(
+            "HINT: Your last type_text action reported success. On the next step, first verify that the requested text is visibly present in the target app. If it is visible, return task_complete. If it is not visible, refocus the text area and try typing again."
+        )
 
     def _maybe_refresh_grounding_providers(
         self,

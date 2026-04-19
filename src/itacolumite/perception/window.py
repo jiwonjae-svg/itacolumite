@@ -103,3 +103,42 @@ def activate_window(window: WindowInfo) -> bool:
         logger.debug("Failed to activate window %s: %s", window.title, exc)
         return False
     return True
+
+
+def find_child_window(
+    parent_hwnd: int,
+    *,
+    class_name: str | None = None,
+    title: str | None = None,
+) -> WindowInfo | None:
+    """Find a descendant window under a visible parent by class or title."""
+    title_lower = title.lower() if title else None
+    matches: list[WindowInfo] = []
+
+    def _callback(hwnd: int, _: object) -> bool:
+        if not win32gui.IsWindowVisible(hwnd):
+            return True
+        child_title = win32gui.GetWindowText(hwnd)
+        child_class = win32gui.GetClassName(hwnd)
+        if class_name is not None and child_class != class_name:
+            return True
+        if title_lower is not None and title_lower not in child_title.lower():
+            return True
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        matches.append(
+            WindowInfo(
+                hwnd=hwnd,
+                title=child_title,
+                class_name=child_class,
+                rect=win32gui.GetWindowRect(hwnd),
+                pid=pid,
+            )
+        )
+        return False
+
+    try:
+        win32gui.EnumChildWindows(parent_hwnd, _callback, None)
+    except Exception as exc:
+        logger.debug("Failed to enumerate child windows for %s: %s", parent_hwnd, exc)
+        return None
+    return matches[0] if matches else None

@@ -68,7 +68,9 @@ Do NOT use free-form command strings. Pipeline operators (|, >, >>) and Invoke-E
 8. Do NOT open a terminal and type a command manually if the same result can be achieved with a structured shell_exec action.
 9. If a clickable element is hard to localize, explain the ambiguity instead of guessing a click.
 10. Trust recent successful action history unless the current screenshot clearly contradicts it. Do not describe a successful type_text action as failed without strong visual evidence.
-11. If the task is already satisfied, return task_complete immediately. For simple launch-and-type tasks such as opening Notepad and entering requested text, do not click again after successful typing unless the screenshot clearly shows the text is missing.
+11. If the task is already satisfied, return task_complete immediately.
+12. Never return task_complete immediately after type_text unless the entered text is visibly present in the screenshot or otherwise verified by the UI.
+13. If a recent type_text reported success but the text is not visible, assume the input likely went to the wrong target or had no effect. Refocus the intended text area and try again instead of ending the task.
 """
 
 

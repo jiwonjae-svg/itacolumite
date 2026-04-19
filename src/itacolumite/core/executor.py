@@ -7,12 +7,15 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+import win32con
+import win32gui
+
 from itacolumite.action.clipboard import ClipboardController
 from itacolumite.action.keyboard import KeyboardController
 from itacolumite.action.mouse import MouseController
 from itacolumite.action.shell import ShellController, ShellRequest
 from itacolumite.ai.response_models import AgentAction, ActionParams
-from itacolumite.perception.window import WindowInfo, activate_window, find_window, get_foreground_window
+from itacolumite.perception.window import WindowInfo, activate_window, find_child_window, find_window, get_foreground_window
 
 logger = logging.getLogger(__name__)
 
@@ -180,8 +183,56 @@ class ActionExecutor:
     def _handle_type_text(self, p: ActionParams) -> ExecutionResult:
         if not p.text:
             return ExecutionResult(False, "type_text", error="Missing text")
-        self._keyboard.type_text(p.text)
-        return ExecutionResult(True, "type_text", output=f"Typed {len(p.text)} chars")
+        text_target = self._prepare_text_target()
+        previous_clipboard: str | None = None
+        clipboard_captured = False
+        try:
+            previous_clipboard = self._clipboard.get_text()
+            clipboard_captured = True
+        except Exception as exc:
+            logger.warning("Failed to capture clipboard before paste: %s", exc)
+
+        try:
+            if self._clipboard.set_text(p.text):
+                time.sleep(0.05)
+                if text_target is not None and self._paste_into_window(text_target):
+                    return ExecutionResult(True, "type_text", output=f"Pasted {len(p.text)} chars")
+                self._keyboard.paste()
+                return ExecutionResult(True, "type_text", output=f"Pasted {len(p.text)} chars")
+
+            logger.warning("Clipboard paste unavailable; falling back to SendInput typing")
+            self._keyboard.type_text(p.text)
+            return ExecutionResult(True, "type_text", output=f"Typed {len(p.text)} chars")
+        finally:
+            if clipboard_captured and previous_clipboard is not None:
+                time.sleep(0.05)
+                if not self._clipboard.set_text(previous_clipboard):
+                    logger.warning("Failed to restore clipboard contents after type_text")
+
+    def _prepare_text_target(self) -> WindowInfo | None:
+        """Apply lightweight app-specific focus fixes before text entry."""
+        try:
+            window = get_foreground_window()
+        except Exception as exc:
+            logger.debug("Failed to inspect foreground window before type_text: %s", exc)
+            return None
+
+        if window.class_name != "Notepad":
+            return None
+
+        editor = find_child_window(window.hwnd, class_name="RichEditD2DPT")
+        if editor is None:
+            editor = find_child_window(window.hwnd, class_name="NotepadTextBox")
+        return editor
+
+    def _paste_into_window(self, window: WindowInfo) -> bool:
+        """Paste clipboard contents directly into a known text control."""
+        try:
+            win32gui.SendMessage(window.hwnd, win32con.WM_PASTE, 0, 0)
+        except Exception as exc:
+            logger.debug("Direct paste into %s failed: %s", window.class_name, exc)
+            return False
+        return True
 
     def _handle_key_press(self, p: ActionParams) -> ExecutionResult:
         key = p.key

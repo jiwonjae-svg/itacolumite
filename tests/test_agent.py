@@ -265,7 +265,7 @@ class TestExecuteStep:
         assert executed_action.params.x2 == 1554
         assert executed_action.params.y2 == 540
 
-    def test_auto_completes_simple_notepad_typing_task(self) -> None:
+    def test_simple_notepad_typing_adds_verification_hint_instead_of_auto_complete(self) -> None:
         agent = _make_agent()
         agent._memory.next_step = MagicMock(return_value=1)
         agent._memory.get_recent_history = MagicMock(return_value=[])
@@ -281,8 +281,8 @@ class TestExecuteStep:
         result = agent._execute_step("메모장을 열고 안녕하세요 라고 써봐")
 
         assert result.success is True
-        assert result.task_complete is True
-        assert result.task_result == "Completed simple text entry task after successful typing."
+        assert result.task_complete is False
+        assert any("verify that the requested text is visibly present" in message for message in agent._user_messages)
 
     def test_does_not_auto_complete_coding_typing_task(self) -> None:
         agent = _make_agent()
@@ -301,3 +301,4 @@ class TestExecuteStep:
 
         assert result.success is True
         assert result.task_complete is False
+        assert agent._user_messages == []

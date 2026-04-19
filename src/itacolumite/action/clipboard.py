@@ -30,14 +30,16 @@ class ClipboardController:
             except Exception:
                 pass
 
-    def set_text(self, text: str) -> None:
+    def set_text(self, text: str) -> bool:
         """클립보드에 텍스트 쓰기."""
         try:
             win32clipboard.OpenClipboard()
             win32clipboard.EmptyClipboard()
             win32clipboard.SetClipboardText(text, win32con.CF_UNICODETEXT)
+            return True
         except Exception as e:
             logger.warning("Failed to set clipboard: %s", e)
+            return False
         finally:
             try:
                 win32clipboard.CloseClipboard()
